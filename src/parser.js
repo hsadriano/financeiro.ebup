@@ -19,6 +19,77 @@ export async function parseFinancialMessage(text, now = new Date()) {
   return parseFinancialMessageLocally(text, now);
 }
 
+export async function parseFinancialImage(imageBuffer, mimeType, filename, now = new Date()) {
+  if (!process.env.OPENAI_API_KEY || !mimeType.startsWith("image/")) return null;
+
+  try {
+    const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
+    const model = process.env.OPENAI_MODEL || "gpt-4.1-nano";
+    const dataUrl = `data:${mimeType};base64,${imageBuffer.toString("base64")}`;
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "Voce faz OCR e extrai dados financeiros de comprovantes, notas fiscais, prints de Pix, boletos e recibos brasileiros. " +
+              "Responda somente JSON valido. Se encontrar uma transacao, use intent transaction. Se nao encontrar valor financeiro, use intent question."
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  today: now.toISOString().slice(0, 10),
+                  filename,
+                  schema: {
+                    intent: "transaction|question",
+                    answer: "string opcional para question",
+                    transaction: {
+                      kind: "income|expense",
+                      amount: "number",
+                      description: "string curta",
+                      merchant: "string|null",
+                      paymentMethod: "Pix|Cartao|Dinheiro|Boleto|null",
+                      transactionDate: "YYYY-MM-DD",
+                      dueDate: "YYYY-MM-DD|null",
+                      category:
+                        "Mercado|Alimentação|Moradia|Transporte|Saúde|Educação|Lazer|Renda|Outros",
+                      confidence: "number de 0 a 1"
+                    }
+                  }
+                })
+              },
+              { type: "image_url", image_url: { url: dataUrl } }
+            ]
+          }
+        ]
+      })
+    });
+
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const content = payload.choices?.[0]?.message?.content;
+    if (!content) return null;
+    const parsed = normalizeAiResult(JSON.parse(content), `Arquivo: ${filename}`, now);
+    if (parsed?.intent === "transaction") {
+      parsed.transaction.source = "upload";
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 function parseFinancialMessageLocally(text, now = new Date()) {
   const normalized = normalizeText(text);
   const amount = extractAmount(normalized);

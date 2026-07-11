@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { loadEnv, hasDatabaseConfig } from "./config.js";
 import { JsonStorage } from "./storage.js";
 import { MariaDbStorage } from "./mariadb-storage.js";
-import { parseFinancialMessage, summarizeTransaction } from "./parser.js";
+import { parseFinancialImage, parseFinancialMessage, summarizeTransaction } from "./parser.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -81,9 +81,23 @@ const server = createServer(async (request, response) => {
         mimeType: file.mimeType,
         status: "ocr_pending"
       });
-      const message =
-        `Recebi o arquivo "${document.originalName}". Ele entrou na fila de OCR; ` +
-        "na proxima etapa vamos extrair valor, vencimento, beneficiario e categoria automaticamente.";
+
+      let message =
+        `Recebi o arquivo "${document.originalName}". `;
+      const imageBuffer = await readFile(file.filePath);
+      const parsed = await parseFinancialImage(imageBuffer, file.mimeType, file.originalName);
+      if (parsed?.intent === "transaction") {
+        const saved = await storage.addTransaction({ ...parsed.transaction, status: "pending" });
+        await storage.updateDocumentStatus(document.id, "review_pending");
+        message += `${summarizeTransaction(saved)} Confira os dados extraidos por OCR antes de confirmar.`;
+      } else if (file.mimeType.startsWith("image/") && process.env.OPENAI_API_KEY) {
+        await storage.updateDocumentStatus(document.id, "failed");
+        message += "Tentei fazer OCR, mas nao consegui encontrar uma transacao financeira com seguranca.";
+      } else if (file.mimeType.startsWith("image/")) {
+        message += "Para fazer OCR automaticamente, configure OPENAI_API_KEY no .env.";
+      } else {
+        message += "Por enquanto o OCR automatico esta habilitado para imagens. PDF fica salvo para a proxima etapa.";
+      }
       await storage.addMessage({ role: "assistant", content: message });
       return sendJson(response, buildState(await storage.read()));
     }
@@ -221,7 +235,7 @@ async function saveUpload(request) {
   await mkdir(uploadDir, { recursive: true });
   await writeFile(path.join(uploadDir, storedName), content);
 
-  return { originalName, storedName, mimeType };
+  return { originalName, storedName, mimeType, filePath: path.join(uploadDir, storedName) };
 }
 
 async function serveStatic(response, pathname) {

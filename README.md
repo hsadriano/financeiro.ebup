@@ -35,6 +35,7 @@ Em hospedagem PHP/Apache, como Hostinger compartilhada, o projeto tambem roda di
 
 - Chat para registrar despesas, receitas e contas a pagar por texto.
 - Upload de imagens/PDFs/comprovantes para iniciar o fluxo de conferência.
+- OCR de imagens com OpenAI quando `OPENAI_API_KEY` estiver configurada.
 - Dashboard mensal com receitas, despesas, resultado, contas a pagar e categorias.
 - Armazenamento em MariaDB quando `.env` estiver configurado.
 - Fallback local em `data/finance.json` quando não houver configuração de banco.
@@ -87,6 +88,12 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
 Quando a chave estiver presente, o chat tenta extrair os dados financeiros pela API. Se a API falhar, o app continua funcionando com o parser local.
+
+## OCR de comprovantes
+
+Com `OPENAI_API_KEY` configurada, uploads `image/*` sao analisados automaticamente. Se a IA encontrar valor, data, forma de pagamento e estabelecimento, o app cria um lançamento pendente para revisao.
+
+PDFs ainda ficam salvos como pendentes; a leitura automatica de PDF entra na proxima etapa.
 
 ## Exemplos de mensagens
 

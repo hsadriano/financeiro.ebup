@@ -88,12 +88,27 @@ try {
             'status' => 'ocr_pending',
         ]);
 
-        add_message(
-            $pdo,
-            $userId,
-            'assistant',
-            "Recebi o arquivo \"{$originalName}\". Ele entrou na fila de OCR; na proxima etapa vamos extrair valor, vencimento, beneficiario e categoria automaticamente."
-        );
+        $message = "Recebi o arquivo \"{$originalName}\". ";
+        $mimeType = (string)($file['type'] ?: 'application/octet-stream');
+        $documentId = (int)$pdo->lastInsertId();
+        $parsed = parse_image_with_openai($target, $mimeType, $originalName, $env);
+
+        if (($parsed['intent'] ?? '') === 'transaction') {
+            $transaction = $parsed['transaction'];
+            $transaction['status'] = 'pending';
+            $saved = add_transaction($pdo, $userId, $transaction);
+            update_document_status($pdo, $userId, $documentId, 'review_pending');
+            $message .= summarize_transaction($saved) . ' Confira os dados extraidos por OCR antes de confirmar.';
+        } elseif (str_starts_with($mimeType, 'image/') && trim((string)($env['OPENAI_API_KEY'] ?? '')) !== '') {
+            update_document_status($pdo, $userId, $documentId, 'failed');
+            $message .= 'Tentei fazer OCR, mas nao consegui encontrar uma transacao financeira com seguranca.';
+        } elseif (str_starts_with($mimeType, 'image/')) {
+            $message .= 'Para fazer OCR automaticamente, configure OPENAI_API_KEY no .env.';
+        } else {
+            $message .= 'Por enquanto o OCR automatico esta habilitado para imagens. PDF fica salvo para a proxima etapa.';
+        }
+
+        add_message($pdo, $userId, 'assistant', $message);
         respond(build_state(read_data($pdo, $userId)));
     }
 
@@ -307,6 +322,12 @@ function add_document(PDO $pdo, int $userId, array $document): void
     $stmt->execute([$userId, $document['originalName'], $document['storedName'], $document['mimeType'], $document['status']]);
 }
 
+function update_document_status(PDO $pdo, int $userId, int $documentId, string $status): void
+{
+    $stmt = $pdo->prepare('UPDATE documents SET status = ? WHERE id = ? AND user_id = ?');
+    $stmt->execute([$status, $documentId, $userId]);
+}
+
 function update_transaction_status(PDO $pdo, int $userId, string $id, string $status): ?array
 {
     $stmt = $pdo->prepare('UPDATE transactions SET status = ? WHERE id = ? AND user_id = ?');
@@ -505,6 +526,103 @@ function parse_with_openai(string $text, array $env): ?array
 
     $decoded = json_decode($content, true);
     return is_array($decoded) ? normalize_ai_result($decoded, $text, $today) : null;
+}
+
+function parse_image_with_openai(string $path, string $mimeType, string $filename, array $env): ?array
+{
+    $apiKey = trim((string)($env['OPENAI_API_KEY'] ?? ''));
+    if ($apiKey === '' || !str_starts_with($mimeType, 'image/') || !function_exists('curl_init')) {
+        return null;
+    }
+
+    $content = file_get_contents($path);
+    if ($content === false) {
+        return null;
+    }
+
+    $baseUrl = rtrim((string)($env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'), '/');
+    $model = trim((string)($env['OPENAI_MODEL'] ?? 'gpt-4.1-nano')) ?: 'gpt-4.1-nano';
+    $today = date('Y-m-d');
+    $dataUrl = 'data:' . $mimeType . ';base64,' . base64_encode($content);
+
+    $body = [
+        'model' => $model,
+        'temperature' => 0,
+        'response_format' => ['type' => 'json_object'],
+        'messages' => [
+            [
+                'role' => 'system',
+                'content' => 'Voce faz OCR e extrai dados financeiros de comprovantes, notas fiscais, prints de Pix, boletos e recibos brasileiros. Responda somente JSON valido. Se encontrar uma transacao, use intent transaction. Se nao encontrar valor financeiro, use intent question.',
+            ],
+            [
+                'role' => 'user',
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => json_encode([
+                            'today' => $today,
+                            'filename' => $filename,
+                            'schema' => [
+                                'intent' => 'transaction|question',
+                                'answer' => 'string opcional para question',
+                                'transaction' => [
+                                    'kind' => 'income|expense',
+                                    'amount' => 'number',
+                                    'description' => 'string curta',
+                                    'merchant' => 'string|null',
+                                    'paymentMethod' => 'Pix|Cartao|Dinheiro|Boleto|null',
+                                    'transactionDate' => 'YYYY-MM-DD',
+                                    'dueDate' => 'YYYY-MM-DD|null',
+                                    'category' => 'Mercado|Alimentação|Moradia|Transporte|Saúde|Educação|Lazer|Renda|Outros',
+                                    'confidence' => 'number de 0 a 1',
+                                ],
+                            ],
+                        ], JSON_UNESCAPED_UNICODE),
+                    ],
+                    [
+                        'type' => 'image_url',
+                        'image_url' => ['url' => $dataUrl],
+                    ],
+                ],
+            ],
+        ],
+    ];
+
+    $curl = curl_init("{$baseUrl}/chat/completions");
+    curl_setopt_array($curl, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            "Authorization: Bearer {$apiKey}",
+        ],
+        CURLOPT_POSTFIELDS => json_encode($body, JSON_UNESCAPED_UNICODE),
+        CURLOPT_TIMEOUT => 20,
+    ]);
+
+    $raw = curl_exec($curl);
+    $status = (int)curl_getinfo($curl, CURLINFO_HTTP_CODE);
+    curl_close($curl);
+    if ($raw === false || $status < 200 || $status >= 300) {
+        return null;
+    }
+
+    $payload = json_decode((string)$raw, true);
+    $responseContent = $payload['choices'][0]['message']['content'] ?? null;
+    if (!is_string($responseContent) || $responseContent === '') {
+        return null;
+    }
+
+    $decoded = json_decode($responseContent, true);
+    if (!is_array($decoded)) {
+        return null;
+    }
+
+    $parsed = normalize_ai_result($decoded, "Arquivo: {$filename}", $today);
+    if (($parsed['intent'] ?? '') === 'transaction') {
+        $parsed['transaction']['source'] = 'upload';
+    }
+    return $parsed;
 }
 
 function normalize_ai_result(array $result, string $rawText, string $today): ?array

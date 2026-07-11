@@ -217,6 +217,14 @@ export class MariaDbStorage {
     return { id: String(result.insertId), createdAt: new Date().toISOString(), ...document };
   }
 
+  async updateDocumentStatus(id, status) {
+    await this.pool.execute(
+      `UPDATE documents SET status = ? WHERE id = ? AND user_id = ?`,
+      [status, id, this.userId]
+    );
+    return { id: String(id), status };
+  }
+
   async ensureSchema() {
     await this.pool.execute(`
       CREATE TABLE IF NOT EXISTS users (
