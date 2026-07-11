@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Assistente Financeiro</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace">
+        <aside class="sidebar" aria-label="Resumo financeiro">
+          <div class="brand">
+            <span class="brand-mark">F</span>
+            <div>
+              <strong>Finanças</strong>
+              <span>assistente pessoal</span>
+            </div>
+          </div>
+
+          <div class="metric-grid">
+            <article class="metric">
+              <span>Receitas</span>
+              <strong id="income">R$ 0,00</strong>
+            </article>
+            <article class="metric">
+              <span>Despesas</span>
+              <strong id="expenses">R$ 0,00</strong>
+            </article>
+            <article class="metric result">
+              <span>Resultado</span>
+              <strong id="result">R$ 0,00</strong>
+            </article>
+            <article class="metric">
+              <span>A pagar</span>
+              <strong id="payable">R$ 0,00</strong>
+            </article>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">
+              <h2>Categorias</h2>
+            </div>
+            <div id="categories" class="category-list"></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">
+              <h2>Arquivos</h2>
+            </div>
+            <div id="documents" class="document-list"></div>
+          </div>
+        </aside>
+
+        <section class="chat-area" aria-label="Chat financeiro">
+          <header class="topbar">
+            <div>
+              <h1>Assistente financeiro</h1>
+              <p>Converse, envie comprovantes e acompanhe seus numeros.</p>
+            </div>
+            <label class="upload-button" title="Enviar comprovante, boleto, nota ou extrato">
+              <input id="file-input" type="file" accept="image/*,.pdf,.txt,.csv" />
+              <span>Enviar arquivo</span>
+            </label>
+          </header>
+
+          <div id="messages" class="messages" aria-live="polite"></div>
+
+          <form id="chat-form" class="composer">
+            <input
+              id="message-input"
+              type="text"
+              autocomplete="off"
+              placeholder="Ex.: paguei R$ 89,90 no mercado hoje no pix"
+            />
+            <button type="submit" title="Enviar mensagem">Enviar</button>
+          </form>
+        </section>
+
+        <aside class="ledger" aria-label="Lancamentos">
+          <div class="panel-title">
+            <h2>Aguardando confirmação</h2>
+          </div>
+          <div id="pending-transactions" class="transaction-list pending-list"></div>
+
+          <div class="panel-title">
+            <h2>Lançamentos</h2>
+          </div>
+          <div id="transactions" class="transaction-list"></div>
+        </aside>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,7 @@
+data/*.json
+uploads/*
+!uploads/.gitkeep
+.env
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
