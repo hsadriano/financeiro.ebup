@@ -1,6 +1,7 @@
 DirectoryIndex public/index.html index.html index.php
+AddType application/manifest+json .webmanifest
 
 RewriteEngine On
 RewriteRule ^$ public/index.html [L]
-RewriteRule ^(app\.js|styles\.css)$ public/$1 [L]
+RewriteRule ^(app\.js|styles\.css|finup-logo\.png|finup-favicon\.png|manifest\.webmanifest)$ public/$1 [L]
 RewriteRule ^api/(.*)$ api.php?path=$1 [QSA,L]
