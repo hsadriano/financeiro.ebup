@@ -60,6 +60,15 @@ export class JsonStorage {
     return transaction;
   }
 
+  async updateTransaction(id, changes) {
+    const data = await this.read();
+    const transaction = data.transactions.find((item) => item.id === id);
+    if (!transaction) return null;
+    Object.assign(transaction, changes);
+    await this.write(data);
+    return transaction;
+  }
+
   async addDocument(document) {
     const data = await this.read();
     const saved = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...document };

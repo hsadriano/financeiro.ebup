@@ -40,7 +40,16 @@ try {
         respond(build_state(read_data($pdo, $userId)));
     }
 
-    if ($method === 'POST' && preg_match('#^transactions/([^/]+)/(confirm|dismiss)$#', $path, $matches)) {
+    if ($method === 'POST' && preg_match('#^transactions/([^/]+)/(confirm|dismiss|update)$#', $path, $matches)) {
+        if ($matches[2] === 'update') {
+            $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+            $updated = update_transaction($pdo, $userId, $matches[1], normalize_transaction_changes($body));
+            if (!$updated) {
+                respond(['error' => 'Lancamento nao encontrado'], 404);
+            }
+            respond(build_state(read_data($pdo, $userId)));
+        }
+
         $status = $matches[2] === 'confirm' ? 'confirmed' : 'dismissed';
         $updated = update_transaction_status($pdo, $userId, $matches[1], $status);
         if (!$updated) {
@@ -311,6 +320,42 @@ function update_transaction_status(PDO $pdo, int $userId, string $id, string $st
     return null;
 }
 
+function update_transaction(PDO $pdo, int $userId, string $id, array $changes): ?array
+{
+    $categoryId = ensure_category($pdo, $userId, $changes['category'], $changes['kind']);
+    $stmt = $pdo->prepare('UPDATE transactions
+        SET kind = ?,
+            category_id = ?,
+            amount = ?,
+            description = ?,
+            merchant = ?,
+            payment_method = ?,
+            transaction_date = ?,
+            due_date = ?
+        WHERE id = ? AND user_id = ? AND status = ?');
+    $stmt->execute([
+        $changes['kind'],
+        $categoryId,
+        $changes['amount'],
+        $changes['description'],
+        $changes['merchant'],
+        $changes['paymentMethod'],
+        $changes['transactionDate'],
+        $changes['dueDate'],
+        $id,
+        $userId,
+        'pending',
+    ]);
+
+    $data = read_data($pdo, $userId);
+    foreach ($data['transactions'] as $transaction) {
+        if ($transaction['id'] === $id) {
+            return $transaction;
+        }
+    }
+    return null;
+}
+
 function ensure_category(PDO $pdo, int $userId, string $name, string $kind): int
 {
     $categoryKind = $kind === 'income' ? 'income' : 'expense';
@@ -381,6 +426,35 @@ function parse_financial_message(string $text): array
             'confidence' => 1,
         ],
     ];
+}
+
+function normalize_transaction_changes(array $body): array
+{
+    $amount = (float)str_replace(',', '.', (string)($body['amount'] ?? ''));
+    if ($amount <= 0) {
+        throw new RuntimeException('Valor invalido.');
+    }
+
+    $kind = ($body['kind'] ?? '') === 'income' ? 'income' : 'expense';
+    return [
+        'kind' => $kind,
+        'amount' => $amount,
+        'description' => mb_substr(trim((string)($body['description'] ?? '')) ?: 'Lancamento sem descricao', 0, 160),
+        'merchant' => trim((string)($body['merchant'] ?? '')) ?: null,
+        'paymentMethod' => trim((string)($body['paymentMethod'] ?? '')) ?: null,
+        'transactionDate' => normalize_date((string)($body['transactionDate'] ?? '')),
+        'dueDate' => trim((string)($body['dueDate'] ?? '')) !== '' ? normalize_date((string)$body['dueDate']) : null,
+        'category' => trim((string)($body['category'] ?? '')) ?: ($kind === 'income' ? 'Renda' : 'Outros'),
+    ];
+}
+
+function normalize_date(string $value): string
+{
+    $date = substr($value, 0, 10);
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+        throw new RuntimeException('Data invalida.');
+    }
+    return $date;
 }
 
 function extract_amount(string $text): ?float

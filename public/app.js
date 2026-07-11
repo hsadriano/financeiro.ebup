@@ -151,15 +151,47 @@ function renderPendingTransactions(transactions) {
   elements.pendingTransactions.innerHTML = transactions
     .map(
       (transaction) => `
-        <article class="transaction-row pending-row">
-          <strong>${escapeHtml(transaction.description)}</strong>
-          <span class="transaction-value ${escapeHtml(transaction.kind)}">${money(transaction.amount)}</span>
-          <div class="transaction-meta">
-            ${escapeHtml(transaction.category)} · ${formatDate(transaction.transactionDate)}
-            ${transaction.dueDate ? ` · vence ${formatDate(transaction.dueDate)}` : ""}
-          </div>
+        <article class="transaction-row pending-row" data-id="${escapeHtml(transaction.id)}">
+          <form class="review-form">
+            <label>
+              <span>Descrição</span>
+              <input name="description" value="${escapeAttribute(transaction.description)}" />
+            </label>
+            <div class="review-grid">
+              <label>
+                <span>Valor</span>
+                <input name="amount" inputmode="decimal" value="${Number(transaction.amount).toFixed(2)}" />
+              </label>
+              <label>
+                <span>Tipo</span>
+                <select name="kind">
+                  <option value="expense" ${transaction.kind === "expense" ? "selected" : ""}>Despesa</option>
+                  <option value="income" ${transaction.kind === "income" ? "selected" : ""}>Receita</option>
+                </select>
+              </label>
+              <label>
+                <span>Categoria</span>
+                <input name="category" list="category-options" value="${escapeAttribute(transaction.category)}" />
+              </label>
+              <label>
+                <span>Data</span>
+                <input name="transactionDate" type="date" value="${escapeAttribute(transaction.transactionDate)}" />
+              </label>
+            </div>
+            <div class="review-grid optional-grid">
+              <label>
+                <span>Forma</span>
+                <input name="paymentMethod" value="${escapeAttribute(transaction.paymentMethod || "")}" placeholder="Pix, cartão..." />
+              </label>
+              <label>
+                <span>Vencimento</span>
+                <input name="dueDate" type="date" value="${escapeAttribute(transaction.dueDate || "")}" />
+              </label>
+            </div>
+          </form>
           <div class="review-actions">
             <button type="button" data-action="confirm" data-id="${escapeHtml(transaction.id)}">Confirmar</button>
+            <button type="button" data-action="update" data-id="${escapeHtml(transaction.id)}">Salvar edição</button>
             <button type="button" data-action="dismiss" data-id="${escapeHtml(transaction.id)}">Descartar</button>
           </div>
         </article>
@@ -172,7 +204,13 @@ function renderPendingTransactions(transactions) {
       const id = button.dataset.id;
       const action = button.dataset.action;
       button.disabled = true;
-      await fetch(`/api/transactions/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+      if (action === "update") {
+        const card = button.closest(".pending-row");
+        const form = card.querySelector(".review-form");
+        await postJson(`/api/transactions/${encodeURIComponent(id)}/update`, Object.fromEntries(new FormData(form)));
+      } else {
+        await fetch(`/api/transactions/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+      }
       await loadState();
     });
   });
@@ -200,4 +238,8 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function escapeAttribute(value) {
+  return escapeHtml(value).replaceAll("`", "&#096;");
 }

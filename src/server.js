@@ -52,8 +52,16 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "POST" && url.pathname.startsWith("/api/transactions/")) {
       const [, , , id, action] = url.pathname.split("/");
-      if (!id || !["confirm", "dismiss"].includes(action)) {
+      if (!id || !["confirm", "dismiss", "update"].includes(action)) {
         return sendJson(response, { error: "Acao invalida" }, 400);
+      }
+
+      if (action === "update") {
+        const body = await readJson(request);
+        const changes = normalizeTransactionChanges(body);
+        const updated = await storage.updateTransaction(id, changes);
+        if (!updated) return sendJson(response, { error: "Lancamento nao encontrado" }, 404);
+        return sendJson(response, buildState(await storage.read()));
       }
 
       const status = action === "confirm" ? "confirmed" : "dismissed";
@@ -156,6 +164,33 @@ function groupByCategory(items) {
   return [...groups.entries()]
     .map(([name, amount]) => ({ name, amount: Number(amount.toFixed(2)) }))
     .sort((a, b) => b.amount - a.amount);
+}
+
+function normalizeTransactionChanges(body) {
+  const amount = Number(String(body.amount || "").replace(",", "."));
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("Valor invalido.");
+  }
+
+  const kind = body.kind === "income" ? "income" : "expense";
+  return {
+    kind,
+    amount,
+    description: String(body.description || "").trim().slice(0, 160) || "Lancamento sem descricao",
+    merchant: String(body.merchant || "").trim() || null,
+    paymentMethod: String(body.paymentMethod || "").trim() || null,
+    transactionDate: normalizeDate(body.transactionDate),
+    dueDate: body.dueDate ? normalizeDate(body.dueDate) : null,
+    category: String(body.category || "").trim() || (kind === "income" ? "Renda" : "Outros")
+  };
+}
+
+function normalizeDate(value) {
+  const text = String(value || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    throw new Error("Data invalida.");
+  }
+  return text;
 }
 
 async function readJson(request) {

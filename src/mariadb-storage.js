@@ -155,6 +155,58 @@ export class MariaDbStorage {
     return rows[0] ? normalizeTransaction(rows[0]) : null;
   }
 
+  async updateTransaction(id, changes) {
+    const categoryId = await this.ensureCategory(changes.category, changes.kind);
+    await this.pool.execute(
+      `UPDATE transactions
+       SET kind = ?,
+           category_id = ?,
+           amount = ?,
+           description = ?,
+           merchant = ?,
+           payment_method = ?,
+           transaction_date = ?,
+           due_date = ?
+       WHERE id = ? AND user_id = ? AND status = 'pending'`,
+      [
+        changes.kind,
+        categoryId,
+        changes.amount,
+        changes.description,
+        changes.merchant,
+        changes.paymentMethod,
+        changes.transactionDate,
+        changes.dueDate,
+        id,
+        this.userId
+      ]
+    );
+
+    const [rows] = await this.pool.execute(
+      `SELECT
+         CAST(t.id AS CHAR) AS id,
+         t.kind,
+         t.status,
+         t.amount,
+         t.description,
+         t.merchant,
+         t.payment_method AS paymentMethod,
+         t.transaction_date AS transactionDate,
+         t.due_date AS dueDate,
+         COALESCE(c.name, 'Outros') AS category,
+         t.source,
+         t.raw_text AS rawText,
+         t.confidence,
+         t.created_at AS createdAt
+       FROM transactions t
+       LEFT JOIN categories c ON c.id = t.category_id
+       WHERE t.id = ? AND t.user_id = ?
+       LIMIT 1`,
+      [id, this.userId]
+    );
+    return rows[0] ? normalizeTransaction(rows[0]) : null;
+  }
+
   async addDocument(document) {
     const [result] = await this.pool.execute(
       `INSERT INTO documents (user_id, original_name, stored_name, mime_type, status)
