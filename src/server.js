@@ -36,7 +36,7 @@ const server = createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/api/chat") {
       const body = await readJson(request);
       await storage.addMessage({ role: "user", content: body.message });
-      const parsed = parseFinancialMessage(body.message);
+      const parsed = await parseFinancialMessage(body.message);
 
       let assistantContent;
       if (parsed.intent === "transaction") {

@@ -13,7 +13,13 @@ const categoryRules = [
   ["Renda", [/\bsalario\b/, /\bfreela\b/, /\brecebi\b/, /\breceita\b/]]
 ];
 
-export function parseFinancialMessage(text, now = new Date()) {
+export async function parseFinancialMessage(text, now = new Date()) {
+  const aiParsed = await parseWithOpenAI(text, now);
+  if (aiParsed) return aiParsed;
+  return parseFinancialMessageLocally(text, now);
+}
+
+function parseFinancialMessageLocally(text, now = new Date()) {
   const normalized = normalizeText(text);
   const amount = extractAmount(normalized);
   const kind = detectKind(normalized);
@@ -48,6 +54,115 @@ export function parseFinancialMessage(text, now = new Date()) {
       confidence: Number(confidence.toFixed(2))
     }
   };
+}
+
+async function parseWithOpenAI(text, now) {
+  if (!process.env.OPENAI_API_KEY) return null;
+
+  try {
+    const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
+    const model = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "Voce extrai dados financeiros pessoais de mensagens em portugues do Brasil. " +
+              "Responda somente JSON valido. Se houver transacao, use intent transaction. " +
+              "Se for pergunta ou texto sem valor financeiro, use intent question."
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              today: now.toISOString().slice(0, 10),
+              message: text,
+              schema: {
+                intent: "transaction|question",
+                answer: "string opcional para question",
+                transaction: {
+                  kind: "income|expense",
+                  amount: "number",
+                  description: "string",
+                  merchant: "string|null",
+                  paymentMethod: "Pix|Cartao|Dinheiro|Boleto|null",
+                  transactionDate: "YYYY-MM-DD",
+                  dueDate: "YYYY-MM-DD|null",
+                  category:
+                    "Mercado|Alimentação|Moradia|Transporte|Saúde|Educação|Lazer|Renda|Outros",
+                  confidence: "number de 0 a 1"
+                }
+              }
+            })
+          }
+        ]
+      })
+    });
+
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const content = payload.choices?.[0]?.message?.content;
+    if (!content) return null;
+    return normalizeAiResult(JSON.parse(content), text, now);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeAiResult(result, rawText, now) {
+  if (result?.intent !== "transaction") {
+    return {
+      intent: "question",
+      answer: result?.answer || answerQuestion(normalizeText(rawText)),
+      confidence: Number(result?.confidence || 0.5)
+    };
+  }
+
+  const transaction = result.transaction || {};
+  const amount = Number(transaction.amount);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+
+  const kind = transaction.kind === "income" ? "income" : "expense";
+  const transactionDate = isIsoDate(transaction.transactionDate)
+    ? transaction.transactionDate
+    : now.toISOString().slice(0, 10);
+  const dueDate = isIsoDate(transaction.dueDate) ? transaction.dueDate : null;
+
+  return {
+    intent: "transaction",
+    transaction: {
+      kind,
+      status: dueDate && kind === "expense" ? "scheduled" : "confirmed",
+      amount,
+      description: String(transaction.description || rawText).trim().slice(0, 160),
+      merchant: transaction.merchant ? String(transaction.merchant).trim() : null,
+      paymentMethod: transaction.paymentMethod ? String(transaction.paymentMethod).trim() : null,
+      transactionDate,
+      dueDate,
+      category: normalizeCategory(transaction.category, kind),
+      source: "chat",
+      rawText,
+      confidence: Math.max(0, Math.min(1, Number(transaction.confidence || 0.8)))
+    }
+  };
+}
+
+function normalizeCategory(category, kind) {
+  const allowed = new Set(["Mercado", "Alimentação", "Moradia", "Transporte", "Saúde", "Educação", "Lazer", "Renda", "Outros"]);
+  if (allowed.has(category)) return category;
+  return kind === "income" ? "Renda" : "Outros";
+}
+
+function isIsoDate(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
 export function summarizeTransaction(transaction) {

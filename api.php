@@ -25,7 +25,7 @@ try {
         }
 
         add_message($pdo, $userId, 'user', $message);
-        $parsed = parse_financial_message($message);
+        $parsed = parse_financial_message($message, $env);
 
         if ($parsed['intent'] === 'transaction') {
             $transaction = $parsed['transaction'];
@@ -392,8 +392,13 @@ function build_state(array $data): array
     ];
 }
 
-function parse_financial_message(string $text): array
+function parse_financial_message(string $text, array $env = []): array
 {
+    $aiParsed = parse_with_openai($text, $env);
+    if ($aiParsed !== null) {
+        return $aiParsed;
+    }
+
     $normalized = normalize_text($text);
     $amount = extract_amount($normalized);
     if (!$amount) {
@@ -426,6 +431,129 @@ function parse_financial_message(string $text): array
             'confidence' => 1,
         ],
     ];
+}
+
+function parse_with_openai(string $text, array $env): ?array
+{
+    $apiKey = trim((string)($env['OPENAI_API_KEY'] ?? ''));
+    if ($apiKey === '' || !function_exists('curl_init')) {
+        return null;
+    }
+
+    $baseUrl = rtrim((string)($env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'), '/');
+    $model = trim((string)($env['OPENAI_MODEL'] ?? 'gpt-4.1-mini')) ?: 'gpt-4.1-mini';
+    $today = date('Y-m-d');
+
+    $body = [
+        'model' => $model,
+        'temperature' => 0,
+        'response_format' => ['type' => 'json_object'],
+        'messages' => [
+            [
+                'role' => 'system',
+                'content' => 'Voce extrai dados financeiros pessoais de mensagens em portugues do Brasil. Responda somente JSON valido. Se houver transacao, use intent transaction. Se for pergunta ou texto sem valor financeiro, use intent question.',
+            ],
+            [
+                'role' => 'user',
+                'content' => json_encode([
+                    'today' => $today,
+                    'message' => $text,
+                    'schema' => [
+                        'intent' => 'transaction|question',
+                        'answer' => 'string opcional para question',
+                        'transaction' => [
+                            'kind' => 'income|expense',
+                            'amount' => 'number',
+                            'description' => 'string',
+                            'merchant' => 'string|null',
+                            'paymentMethod' => 'Pix|Cartao|Dinheiro|Boleto|null',
+                            'transactionDate' => 'YYYY-MM-DD',
+                            'dueDate' => 'YYYY-MM-DD|null',
+                            'category' => 'Mercado|Alimentação|Moradia|Transporte|Saúde|Educação|Lazer|Renda|Outros',
+                            'confidence' => 'number de 0 a 1',
+                        ],
+                    ],
+                ], JSON_UNESCAPED_UNICODE),
+            ],
+        ],
+    ];
+
+    $curl = curl_init("{$baseUrl}/chat/completions");
+    curl_setopt_array($curl, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            "Authorization: Bearer {$apiKey}",
+        ],
+        CURLOPT_POSTFIELDS => json_encode($body, JSON_UNESCAPED_UNICODE),
+        CURLOPT_TIMEOUT => 12,
+    ]);
+
+    $raw = curl_exec($curl);
+    $status = (int)curl_getinfo($curl, CURLINFO_HTTP_CODE);
+    curl_close($curl);
+    if ($raw === false || $status < 200 || $status >= 300) {
+        return null;
+    }
+
+    $payload = json_decode((string)$raw, true);
+    $content = $payload['choices'][0]['message']['content'] ?? null;
+    if (!is_string($content) || $content === '') {
+        return null;
+    }
+
+    $decoded = json_decode($content, true);
+    return is_array($decoded) ? normalize_ai_result($decoded, $text, $today) : null;
+}
+
+function normalize_ai_result(array $result, string $rawText, string $today): ?array
+{
+    if (($result['intent'] ?? '') !== 'transaction') {
+        return [
+            'intent' => 'question',
+            'answer' => (string)($result['answer'] ?? 'Nao encontrei um valor financeiro nessa mensagem. Tente algo como: paguei R$ 89,90 no mercado hoje.'),
+        ];
+    }
+
+    $transaction = $result['transaction'] ?? [];
+    $amount = (float)($transaction['amount'] ?? 0);
+    if ($amount <= 0) {
+        return null;
+    }
+
+    $kind = ($transaction['kind'] ?? '') === 'income' ? 'income' : 'expense';
+    $transactionDate = is_iso_date((string)($transaction['transactionDate'] ?? '')) ? (string)$transaction['transactionDate'] : $today;
+    $dueDate = is_iso_date((string)($transaction['dueDate'] ?? '')) ? (string)$transaction['dueDate'] : null;
+
+    return [
+        'intent' => 'transaction',
+        'transaction' => [
+            'kind' => $kind,
+            'status' => $dueDate && $kind === 'expense' ? 'scheduled' : 'confirmed',
+            'amount' => $amount,
+            'description' => mb_substr(trim((string)($transaction['description'] ?? $rawText)) ?: $rawText, 0, 160),
+            'merchant' => trim((string)($transaction['merchant'] ?? '')) ?: null,
+            'paymentMethod' => trim((string)($transaction['paymentMethod'] ?? '')) ?: null,
+            'transactionDate' => $transactionDate,
+            'dueDate' => $dueDate,
+            'category' => normalize_category((string)($transaction['category'] ?? ''), $kind),
+            'source' => 'chat',
+            'rawText' => $rawText,
+            'confidence' => max(0, min(1, (float)($transaction['confidence'] ?? 0.8))),
+        ],
+    ];
+}
+
+function normalize_category(string $category, string $kind): string
+{
+    $allowed = ['Mercado', 'Alimentação', 'Moradia', 'Transporte', 'Saúde', 'Educação', 'Lazer', 'Renda', 'Outros'];
+    return in_array($category, $allowed, true) ? $category : ($kind === 'income' ? 'Renda' : 'Outros');
+}
+
+function is_iso_date(string $value): bool
+{
+    return preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) === 1;
 }
 
 function normalize_transaction_changes(array $body): array

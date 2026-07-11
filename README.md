@@ -76,6 +76,18 @@ cp .env.example .env
 
 Depois preencha o `.env` real. O `.htaccess` serve a interface em `public/` e encaminha `/api/*` para `api.php`.
 
+## Interpretação com IA
+
+O app usa um parser local por regras como fallback. Para melhorar o entendimento de texto livre, configure:
+
+```text
+OPENAI_API_KEY=sua_chave
+OPENAI_MODEL=gpt-4.1-mini
+OPENAI_BASE_URL=https://api.openai.com/v1
+```
+
+Quando a chave estiver presente, o chat tenta extrair os dados financeiros pela API. Se a API falhar, o app continua funcionando com o parser local.
+
 ## Exemplos de mensagens
 
 ```text
