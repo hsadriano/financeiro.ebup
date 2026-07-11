@@ -1,5 +1,6 @@
 const state = {
-  currency: new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" })
+  currency: new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }),
+  activePanel: "chat"
 };
 
 const elements = {
@@ -14,8 +15,16 @@ const elements = {
   transactions: document.querySelector("#transactions"),
   form: document.querySelector("#chat-form"),
   input: document.querySelector("#message-input"),
-  fileInput: document.querySelector("#file-input")
+  fileInput: document.querySelector("#file-input"),
+  panels: document.querySelectorAll("[data-panel]"),
+  tabs: document.querySelectorAll("[data-tab]"),
+  pendingBadge: document.querySelector("#pending-badge"),
+  filesBadge: document.querySelector("#files-badge")
 };
+
+elements.tabs.forEach((tab) => {
+  tab.addEventListener("click", () => activatePanel(tab.dataset.tab));
+});
 
 elements.form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -64,6 +73,28 @@ function render(data) {
   renderDocuments(data.documents);
   renderPendingTransactions(data.pendingTransactions || []);
   renderTransactions(data.transactions);
+  updateBadges(data);
+}
+
+function activatePanel(name) {
+  state.activePanel = name;
+  elements.panels.forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === name));
+  elements.tabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.tab === name));
+  if (name === "chat") {
+    requestAnimationFrame(() => {
+      elements.messages.scrollTop = elements.messages.scrollHeight;
+    });
+  }
+}
+
+function updateBadges(data) {
+  setBadge(elements.pendingBadge, (data.pendingTransactions || []).length);
+  setBadge(elements.filesBadge, (data.documents || []).filter((item) => item.status !== "processed").length);
+}
+
+function setBadge(element, count) {
+  element.textContent = String(count);
+  element.hidden = count === 0;
 }
 
 function renderMessages(messages) {
