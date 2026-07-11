@@ -13,12 +13,19 @@ export async function loadEnv(root) {
       if (separator === -1) continue;
 
       const key = trimmed.slice(0, separator).trim();
-      const value = trimmed.slice(separator + 1).trim();
+      const value = unquoteEnvValue(trimmed.slice(separator + 1).trim());
       if (!process.env[key]) process.env[key] = value;
     }
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
+}
+
+function unquoteEnvValue(value) {
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
+  }
+  return value;
 }
 
 export function hasDatabaseConfig() {

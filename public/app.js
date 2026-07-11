@@ -1,9 +1,32 @@
 const state = {
   currency: new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }),
-  activePanel: "chat"
+  activePanel: "summary",
+  session: null,
+  authMode: new URLSearchParams(window.location.search).has("reset") ? "reset" : "login",
+  resetToken: new URLSearchParams(window.location.search).get("reset")
 };
 
 const elements = {
+  authScreen: document.querySelector("#auth-screen"),
+  appShell: document.querySelector("#app-shell"),
+  authForm: document.querySelector("#auth-form"),
+  authNameField: document.querySelector("#auth-name-field"),
+  authEmailField: document.querySelector("#auth-email-field"),
+  authPasswordField: document.querySelector("#auth-password-field"),
+  authName: document.querySelector("#auth-name"),
+  authEmail: document.querySelector("#auth-email"),
+  authPassword: document.querySelector("#auth-password"),
+  authRememberField: document.querySelector("#auth-remember-field"),
+  authRemember: document.querySelector("#auth-remember"),
+  authError: document.querySelector("#auth-error"),
+  authHelp: document.querySelector("#auth-help"),
+  forgotPasswordButton: document.querySelector("#forgot-password-button"),
+  backLoginButton: document.querySelector("#back-login-button"),
+  userName: document.querySelector("#user-name"),
+  controlSelect: document.querySelector("#control-select"),
+  newControlButton: document.querySelector("#new-control-button"),
+  shareControlButton: document.querySelector("#share-control-button"),
+  logoutButton: document.querySelector("#logout-button"),
   income: document.querySelector("#income"),
   expenses: document.querySelector("#expenses"),
   result: document.querySelector("#result"),
@@ -26,6 +49,75 @@ elements.tabs.forEach((tab) => {
   tab.addEventListener("click", () => activatePanel(tab.dataset.tab));
 });
 
+elements.authForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (state.authMode === "reset") {
+    await resetPassword();
+    return;
+  }
+  if (state.authMode === "forgot") {
+    await requestPasswordReset();
+    return;
+  }
+  if (state.authMode === "register") {
+    await submitAuth("register");
+    return;
+  }
+  await submitAuth("login");
+});
+
+document.querySelector('[data-auth-action="register"]').addEventListener("click", async () => {
+  if (state.authMode === "register") {
+    setAuthMode("login");
+    return;
+  }
+  if (state.authMode !== "register") {
+    setAuthMode("register");
+    return;
+  }
+});
+
+elements.forgotPasswordButton.addEventListener("click", async () => {
+  if (state.authMode !== "forgot") {
+    setAuthMode("forgot");
+    return;
+  }
+  await requestPasswordReset();
+});
+
+elements.backLoginButton.addEventListener("click", () => {
+  history.replaceState(null, "", window.location.pathname);
+  state.resetToken = null;
+  setAuthMode("login");
+});
+
+elements.logoutButton.addEventListener("click", async () => {
+  await fetch("/api/auth/logout", { method: "POST" });
+  state.session = null;
+  showAuth();
+});
+
+elements.controlSelect.addEventListener("change", async () => {
+  await postJson("/api/controls/select", { controlId: elements.controlSelect.value });
+  await loadSession();
+  await loadState();
+});
+
+elements.newControlButton.addEventListener("click", async () => {
+  const name = prompt("Nome do novo controle financeiro");
+  if (!name?.trim()) return;
+  await postJson("/api/controls", { name: name.trim() });
+  await loadSession();
+  await loadState();
+});
+
+elements.shareControlButton.addEventListener("click", async () => {
+  const email = prompt("E-mail do usuário cadastrado para compartilhar este controle");
+  if (!email?.trim()) return;
+  await postJson("/api/controls/share", { email: email.trim() });
+  await loadSession();
+});
+
 elements.form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const message = elements.input.value.trim();
@@ -46,20 +138,181 @@ elements.fileInput.addEventListener("change", async () => {
   await loadState();
 });
 
-loadState();
+init();
+
+async function init() {
+  setAuthMode(state.authMode);
+  await loadSession();
+  if (state.session?.user && state.authMode !== "reset") {
+    showApp();
+    await loadState();
+  } else {
+    showAuth();
+  }
+}
+
+async function loadSession() {
+  const response = await fetch("/api/session");
+  state.session = await response.json();
+  renderSession();
+}
 
 async function loadState() {
   const response = await fetch("/api/state");
+  if (response.status === 401) {
+    showAuth();
+    return;
+  }
   const data = await response.json();
   render(data);
 }
 
 async function postJson(url, payload) {
-  await fetch(url, {
+  return fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
+}
+
+async function submitAuth(action) {
+  clearAuthMessages();
+  const payload = {
+    name: elements.authName.value.trim(),
+    email: elements.authEmail.value.trim(),
+    password: elements.authPassword.value,
+    remember: elements.authRemember.checked
+  };
+
+  const response = await postJson(`/api/auth/${action}`, payload);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: "Falha ao autenticar." }));
+    elements.authError.textContent = error.error || "Falha ao autenticar.";
+    elements.authError.hidden = false;
+    return;
+  }
+
+  await loadSession();
+  showApp();
+  await loadState();
+}
+
+function showAuth() {
+  elements.authScreen.hidden = false;
+  elements.appShell.hidden = true;
+  setAuthMode(state.authMode);
+}
+
+function showApp() {
+  elements.authScreen.hidden = true;
+  elements.appShell.hidden = false;
+}
+
+function renderSession() {
+  const controls = state.session?.controls || [];
+  elements.userName.textContent = state.session?.user?.name || "";
+  elements.controlSelect.innerHTML = controls
+    .map((control) => `<option value="${escapeAttribute(control.id)}">${escapeHtml(control.name)}</option>`)
+    .join("");
+  if (state.session?.activeControlId) {
+    elements.controlSelect.value = state.session.activeControlId;
+  }
+}
+
+function setAuthMode(mode) {
+  state.authMode = mode;
+  const loginMode = mode === "login";
+  const registerMode = mode === "register";
+  const forgotMode = mode === "forgot";
+  const resetMode = mode === "reset";
+  const submitButton = document.querySelector('[data-auth-action="login"]');
+  const registerButton = document.querySelector('[data-auth-action="register"]');
+  const subtitle = document.querySelector(".auth-card .brand span");
+
+  elements.authNameField.hidden = !registerMode;
+  elements.authEmailField.hidden = resetMode;
+  elements.authPasswordField.hidden = forgotMode;
+  elements.authRememberField.hidden = !loginMode;
+  registerButton.hidden = forgotMode || resetMode;
+  elements.forgotPasswordButton.hidden = resetMode || registerMode;
+  elements.backLoginButton.hidden = loginMode || registerMode;
+  elements.authEmail.required = !resetMode;
+  elements.authPassword.required = !forgotMode;
+  elements.authName.required = registerMode;
+
+  if (loginMode) {
+    subtitle.textContent = "entrar na conta";
+    submitButton.textContent = "Entrar";
+    registerButton.textContent = "Criar conta";
+    elements.forgotPasswordButton.textContent = "Esqueci minha senha";
+    elements.authPassword.placeholder = "";
+  } else if (registerMode) {
+    subtitle.textContent = "criar nova conta";
+    submitButton.textContent = "Criar conta";
+    registerButton.textContent = "Ja tenho conta";
+    elements.forgotPasswordButton.textContent = "Esqueci minha senha";
+    elements.authPassword.placeholder = "";
+  } else if (forgotMode) {
+    subtitle.textContent = "recuperar acesso";
+    submitButton.textContent = "Entrar";
+    elements.forgotPasswordButton.textContent = "Enviar link de recuperação";
+    elements.authPassword.placeholder = "Senha atual";
+  } else {
+    subtitle.textContent = "definir nova senha";
+    submitButton.textContent = "Salvar nova senha";
+    elements.authPassword.placeholder = "Nova senha";
+  }
+  clearAuthMessages();
+}
+
+async function requestPasswordReset() {
+  clearAuthMessages();
+  const email = elements.authEmail.value.trim();
+  if (!email) {
+    showAuthError("Informe seu e-mail para receber o link.");
+    return;
+  }
+  const response = await postJson("/api/auth/forgot", { email });
+  if (!response.ok) {
+    showAuthError("Nao consegui enviar o link agora. Tente novamente.");
+    return;
+  }
+  showAuthHelp("Se este e-mail estiver cadastrado, enviaremos um link para redefinir sua senha.");
+}
+
+async function resetPassword() {
+  clearAuthMessages();
+  const password = elements.authPassword.value;
+  if (password.length < 6) {
+    showAuthError("A nova senha precisa ter pelo menos 6 caracteres.");
+    return;
+  }
+  const response = await postJson("/api/auth/reset", { token: state.resetToken, password });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: "Link invalido ou expirado." }));
+    showAuthError(error.error || "Link invalido ou expirado.");
+    return;
+  }
+  history.replaceState(null, "", window.location.pathname);
+  state.resetToken = null;
+  elements.authPassword.value = "";
+  setAuthMode("login");
+  showAuthHelp("Senha alterada. Agora voce ja pode entrar.");
+}
+
+function clearAuthMessages() {
+  elements.authError.hidden = true;
+  elements.authHelp.hidden = true;
+}
+
+function showAuthError(message) {
+  elements.authError.textContent = message;
+  elements.authError.hidden = false;
+}
+
+function showAuthHelp(message) {
+  elements.authHelp.textContent = message;
+  elements.authHelp.hidden = false;
 }
 
 function render(data) {

@@ -12,6 +12,43 @@ CREATE TABLE users (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE financial_controls (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(160) NOT NULL,
+  owner_user_id BIGINT UNSIGNED NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_controls_owner (owner_user_id)
+);
+
+CREATE TABLE control_members (
+  control_id BIGINT UNSIGNED NOT NULL,
+  user_id BIGINT UNSIGNED NOT NULL,
+  role ENUM('owner', 'editor', 'viewer') NOT NULL DEFAULT 'editor',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (control_id, user_id),
+  INDEX idx_members_user (user_id)
+);
+
+CREATE TABLE user_sessions (
+  token_hash CHAR(64) NOT NULL PRIMARY KEY,
+  user_id BIGINT UNSIGNED NOT NULL,
+  active_control_id BIGINT UNSIGNED NULL,
+  expires_at DATETIME NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_sessions_user (user_id),
+  INDEX idx_sessions_expires (expires_at)
+);
+
+CREATE TABLE password_reset_tokens (
+  token_hash CHAR(64) NOT NULL PRIMARY KEY,
+  user_id BIGINT UNSIGNED NOT NULL,
+  expires_at DATETIME NOT NULL,
+  used_at DATETIME NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_reset_user (user_id),
+  INDEX idx_reset_expires (expires_at)
+);
+
 CREATE TABLE financial_accounts (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   user_id BIGINT UNSIGNED NOT NULL,
@@ -24,14 +61,17 @@ CREATE TABLE financial_accounts (
 
 CREATE TABLE categories (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  control_id BIGINT UNSIGNED NULL,
   user_id BIGINT UNSIGNED NULL,
   name VARCHAR(120) NOT NULL,
   kind ENUM('income', 'expense') NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_categories_control_name_kind (control_id, name, kind)
 );
 
 CREATE TABLE transactions (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  control_id BIGINT UNSIGNED NULL,
   user_id BIGINT UNSIGNED NOT NULL,
   account_id BIGINT UNSIGNED NULL,
   category_id BIGINT UNSIGNED NULL,
@@ -57,6 +97,7 @@ CREATE TABLE transactions (
 
 CREATE TABLE documents (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  control_id BIGINT UNSIGNED NULL,
   user_id BIGINT UNSIGNED NOT NULL,
   original_name VARCHAR(255) NOT NULL,
   stored_name VARCHAR(255) NOT NULL,
@@ -70,6 +111,7 @@ CREATE TABLE documents (
 
 CREATE TABLE chat_messages (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  control_id BIGINT UNSIGNED NULL,
   user_id BIGINT UNSIGNED NOT NULL,
   role ENUM('user', 'assistant', 'system') NOT NULL,
   content TEXT NOT NULL,

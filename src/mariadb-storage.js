@@ -11,6 +11,7 @@ export class MariaDbStorage {
     this.config = config;
     this.pool = null;
     this.userId = null;
+    this.controlId = null;
   }
 
   async init() {
@@ -29,16 +30,22 @@ export class MariaDbStorage {
 
     await this.ensureSchema();
     this.userId = await this.ensureDefaultUser();
+    this.controlId = await this.ensureDefaultControl(this.userId);
     await this.ensureWelcomeMessage();
+  }
+
+  setContext(userId, controlId) {
+    this.userId = userId;
+    this.controlId = controlId;
   }
 
   async read() {
     const [messages] = await this.pool.execute(
       `SELECT CAST(id AS CHAR) AS id, role, content, created_at AS createdAt
        FROM chat_messages
-       WHERE user_id = ?
+       WHERE control_id = ?
        ORDER BY created_at ASC, id ASC`,
-      [this.userId]
+      [this.controlId]
     );
 
     const [transactions] = await this.pool.execute(
@@ -59,9 +66,9 @@ export class MariaDbStorage {
          t.created_at AS createdAt
        FROM transactions t
        LEFT JOIN categories c ON c.id = t.category_id
-       WHERE t.user_id = ?
+       WHERE t.control_id = ?
        ORDER BY t.created_at DESC, t.id DESC`,
-      [this.userId]
+      [this.controlId]
     );
 
     const [documents] = await this.pool.execute(
@@ -73,9 +80,9 @@ export class MariaDbStorage {
          status,
          created_at AS createdAt
        FROM documents
-       WHERE user_id = ?
+       WHERE control_id = ?
        ORDER BY created_at DESC, id DESC`,
-      [this.userId]
+      [this.controlId]
     );
 
     return {
@@ -87,8 +94,8 @@ export class MariaDbStorage {
 
   async addMessage(message) {
     const [result] = await this.pool.execute(
-      `INSERT INTO chat_messages (user_id, role, content) VALUES (?, ?, ?)`,
-      [this.userId, message.role, message.content]
+      `INSERT INTO chat_messages (control_id, user_id, role, content) VALUES (?, ?, ?, ?)`,
+      [this.controlId, this.userId, message.role, message.content]
     );
     return {
       id: String(result.insertId),
@@ -102,10 +109,11 @@ export class MariaDbStorage {
     const categoryId = await this.ensureCategory(transaction.category, transaction.kind);
     const [result] = await this.pool.execute(
       `INSERT INTO transactions (
-         user_id, category_id, kind, status, amount, description, merchant, payment_method,
+         control_id, user_id, category_id, kind, status, amount, description, merchant, payment_method,
          transaction_date, due_date, source, raw_text, confidence
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        this.controlId,
         this.userId,
         categoryId,
         transaction.kind,
@@ -127,8 +135,8 @@ export class MariaDbStorage {
 
   async updateTransactionStatus(id, status) {
     await this.pool.execute(
-      `UPDATE transactions SET status = ? WHERE id = ? AND user_id = ?`,
-      [status, id, this.userId]
+      `UPDATE transactions SET status = ? WHERE id = ? AND user_id = ? AND control_id = ?`,
+      [status, id, this.userId, this.controlId]
     );
     const [rows] = await this.pool.execute(
       `SELECT
@@ -148,9 +156,9 @@ export class MariaDbStorage {
          t.created_at AS createdAt
        FROM transactions t
        LEFT JOIN categories c ON c.id = t.category_id
-       WHERE t.id = ? AND t.user_id = ?
+       WHERE t.id = ? AND t.user_id = ? AND t.control_id = ?
        LIMIT 1`,
-      [id, this.userId]
+      [id, this.userId, this.controlId]
     );
     return rows[0] ? normalizeTransaction(rows[0]) : null;
   }
@@ -167,7 +175,7 @@ export class MariaDbStorage {
            payment_method = ?,
            transaction_date = ?,
            due_date = ?
-       WHERE id = ? AND user_id = ? AND status = 'pending'`,
+       WHERE id = ? AND user_id = ? AND control_id = ? AND status = 'pending'`,
       [
         changes.kind,
         categoryId,
@@ -178,7 +186,8 @@ export class MariaDbStorage {
         changes.transactionDate,
         changes.dueDate,
         id,
-        this.userId
+        this.userId,
+        this.controlId
       ]
     );
 
@@ -200,18 +209,18 @@ export class MariaDbStorage {
          t.created_at AS createdAt
        FROM transactions t
        LEFT JOIN categories c ON c.id = t.category_id
-       WHERE t.id = ? AND t.user_id = ?
+       WHERE t.id = ? AND t.user_id = ? AND t.control_id = ?
        LIMIT 1`,
-      [id, this.userId]
+      [id, this.userId, this.controlId]
     );
     return rows[0] ? normalizeTransaction(rows[0]) : null;
   }
 
   async addDocument(document) {
     const [result] = await this.pool.execute(
-      `INSERT INTO documents (user_id, original_name, stored_name, mime_type, status)
-       VALUES (?, ?, ?, ?, ?)`,
-      [this.userId, document.originalName, document.storedName, document.mimeType, document.status]
+      `INSERT INTO documents (control_id, user_id, original_name, stored_name, mime_type, status)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [this.controlId, this.userId, document.originalName, document.storedName, document.mimeType, document.status]
     );
 
     return { id: String(result.insertId), createdAt: new Date().toISOString(), ...document };
@@ -219,8 +228,8 @@ export class MariaDbStorage {
 
   async updateDocumentStatus(id, status) {
     await this.pool.execute(
-      `UPDATE documents SET status = ? WHERE id = ? AND user_id = ?`,
-      [status, id, this.userId]
+      `UPDATE documents SET status = ? WHERE id = ? AND user_id = ? AND control_id = ?`,
+      [status, id, this.userId, this.controlId]
     );
     return { id: String(id), status };
   }
@@ -237,13 +246,59 @@ export class MariaDbStorage {
     `);
 
     await this.pool.execute(`
+      CREATE TABLE IF NOT EXISTS financial_controls (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(160) NOT NULL,
+        owner_user_id BIGINT UNSIGNED NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_controls_owner (owner_user_id)
+      )
+    `);
+
+    await this.pool.execute(`
+      CREATE TABLE IF NOT EXISTS control_members (
+        control_id BIGINT UNSIGNED NOT NULL,
+        user_id BIGINT UNSIGNED NOT NULL,
+        role ENUM('owner', 'editor', 'viewer') NOT NULL DEFAULT 'editor',
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (control_id, user_id),
+        INDEX idx_members_user (user_id)
+      )
+    `);
+
+    await this.pool.execute(`
+      CREATE TABLE IF NOT EXISTS user_sessions (
+        token_hash CHAR(64) NOT NULL PRIMARY KEY,
+        user_id BIGINT UNSIGNED NOT NULL,
+        active_control_id BIGINT UNSIGNED NULL,
+        expires_at DATETIME NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_sessions_user (user_id),
+        INDEX idx_sessions_expires (expires_at)
+      )
+    `);
+
+    await this.pool.execute(`
+      CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        token_hash CHAR(64) NOT NULL PRIMARY KEY,
+        user_id BIGINT UNSIGNED NOT NULL,
+        expires_at DATETIME NOT NULL,
+        used_at DATETIME NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_reset_user (user_id),
+        INDEX idx_reset_expires (expires_at)
+      )
+    `);
+
+    await this.pool.execute(`
       CREATE TABLE IF NOT EXISTS categories (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        control_id BIGINT UNSIGNED NULL,
         user_id BIGINT UNSIGNED NULL,
         name VARCHAR(120) NOT NULL,
         kind ENUM('income', 'expense') NOT NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY uq_categories_user_name_kind (user_id, name, kind)
+        UNIQUE KEY uq_categories_control_name_kind (control_id, name, kind)
       )
     `);
 
@@ -262,6 +317,7 @@ export class MariaDbStorage {
     await this.pool.execute(`
       CREATE TABLE IF NOT EXISTS transactions (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        control_id BIGINT UNSIGNED NULL,
         user_id BIGINT UNSIGNED NOT NULL,
         account_id BIGINT UNSIGNED NULL,
         category_id BIGINT UNSIGNED NULL,
@@ -294,6 +350,7 @@ export class MariaDbStorage {
     await this.pool.execute(`
       CREATE TABLE IF NOT EXISTS documents (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        control_id BIGINT UNSIGNED NULL,
         user_id BIGINT UNSIGNED NOT NULL,
         original_name VARCHAR(255) NOT NULL,
         stored_name VARCHAR(255) NOT NULL,
@@ -309,6 +366,7 @@ export class MariaDbStorage {
     await this.pool.execute(`
       CREATE TABLE IF NOT EXISTS chat_messages (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        control_id BIGINT UNSIGNED NULL,
         user_id BIGINT UNSIGNED NOT NULL,
         role ENUM('user', 'assistant', 'system') NOT NULL,
         content TEXT NOT NULL,
@@ -316,6 +374,70 @@ export class MariaDbStorage {
         CONSTRAINT fk_chat_user FOREIGN KEY (user_id) REFERENCES users(id),
         INDEX idx_chat_user_created (user_id, created_at)
       )
+    `);
+
+    await this.addColumnIfMissing("categories", "control_id", "BIGINT UNSIGNED NULL AFTER id");
+    await this.addColumnIfMissing("transactions", "control_id", "BIGINT UNSIGNED NULL AFTER id");
+    await this.addColumnIfMissing("documents", "control_id", "BIGINT UNSIGNED NULL AFTER id");
+    await this.addColumnIfMissing("chat_messages", "control_id", "BIGINT UNSIGNED NULL AFTER id");
+    await this.migrateDefaultControl();
+    await this.ensureCategoryUniqueIndex();
+  }
+
+  async addColumnIfMissing(table, column, definition) {
+    try {
+      await this.pool.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    } catch (error) {
+      if (!String(error.message).includes("Duplicate column")) throw error;
+    }
+  }
+
+  async migrateDefaultControl() {
+    const userId = await this.ensureDefaultUser();
+    const controlId = await this.ensureDefaultControl(userId);
+    for (const table of ["categories", "transactions", "documents", "chat_messages"]) {
+      await this.pool.execute(`UPDATE ${table} SET control_id = ? WHERE control_id IS NULL`, [controlId]);
+    }
+  }
+
+  async ensureCategoryUniqueIndex() {
+    try {
+      await this.pool.execute(`ALTER TABLE categories DROP INDEX uq_categories_user_name_kind`);
+    } catch (error) {
+      if (!String(error.message).includes("check that")) throw error;
+    }
+    try {
+      await this.pool.execute(`ALTER TABLE categories ADD UNIQUE KEY uq_categories_control_name_kind (control_id, name, kind)`);
+    } catch (error) {
+      if (String(error.message).includes("Duplicate entry")) {
+        await this.dedupeCategories();
+        await this.pool.execute(`ALTER TABLE categories ADD UNIQUE KEY uq_categories_control_name_kind (control_id, name, kind)`);
+        return;
+      }
+      if (!String(error.message).includes("Duplicate key name")) throw error;
+    }
+  }
+
+  async dedupeCategories() {
+    await this.pool.execute(`
+      UPDATE transactions t
+      INNER JOIN categories c ON c.id = t.category_id
+      INNER JOIN (
+        SELECT MIN(id) AS keep_id, control_id, name, kind
+        FROM categories
+        GROUP BY control_id, name, kind
+      ) keeper ON keeper.control_id <=> c.control_id AND keeper.name = c.name AND keeper.kind = c.kind
+      SET t.category_id = keeper.keep_id
+      WHERE c.id <> keeper.keep_id
+    `);
+    await this.pool.execute(`
+      DELETE c FROM categories c
+      INNER JOIN (
+        SELECT MIN(id) AS keep_id, control_id, name, kind
+        FROM categories
+        GROUP BY control_id, name, kind
+      ) keeper ON keeper.control_id <=> c.control_id AND keeper.name = c.name AND keeper.kind = c.kind
+      WHERE c.id <> keeper.keep_id
     `);
   }
 
@@ -328,10 +450,33 @@ export class MariaDbStorage {
     return rows[0].id;
   }
 
+  async ensureDefaultControl(userId) {
+    const [existing] = await this.pool.execute(
+      `SELECT id FROM financial_controls WHERE owner_user_id = ? ORDER BY id LIMIT 1`,
+      [userId]
+    );
+    if (existing[0]?.id) {
+      await this.pool.execute(
+        `INSERT IGNORE INTO control_members (control_id, user_id, role) VALUES (?, ?, ?)`,
+        [existing[0].id, userId, "owner"]
+      );
+      return existing[0].id;
+    }
+    const [result] = await this.pool.execute(
+      `INSERT INTO financial_controls (name, owner_user_id) VALUES (?, ?)`,
+      ["Meu controle financeiro", userId]
+    );
+    await this.pool.execute(
+      `INSERT INTO control_members (control_id, user_id, role) VALUES (?, ?, ?)`,
+      [result.insertId, userId, "owner"]
+    );
+    return result.insertId;
+  }
+
   async ensureWelcomeMessage() {
     const [rows] = await this.pool.execute(
-      `SELECT id FROM chat_messages WHERE user_id = ? LIMIT 1`,
-      [this.userId]
+      `SELECT id FROM chat_messages WHERE control_id = ? LIMIT 1`,
+      [this.controlId]
     );
     if (rows.length) return;
     await this.addMessage({ role: "assistant", content: welcomeMessage });
@@ -340,12 +485,12 @@ export class MariaDbStorage {
   async ensureCategory(name, kind) {
     const categoryKind = kind === "income" ? "income" : "expense";
     await this.pool.execute(
-      `INSERT IGNORE INTO categories (user_id, name, kind) VALUES (?, ?, ?)`,
-      [this.userId, name || "Outros", categoryKind]
+      `INSERT IGNORE INTO categories (control_id, user_id, name, kind) VALUES (?, ?, ?, ?)`,
+      [this.controlId, this.userId, name || "Outros", categoryKind]
     );
     const [rows] = await this.pool.execute(
-      `SELECT id FROM categories WHERE user_id = ? AND name = ? AND kind = ? LIMIT 1`,
-      [this.userId, name || "Outros", categoryKind]
+      `SELECT id FROM categories WHERE control_id = ? AND name = ? AND kind = ? LIMIT 1`,
+      [this.controlId, name || "Outros", categoryKind]
     );
     return rows[0].id;
   }

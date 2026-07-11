@@ -3,23 +3,82 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Assistente Financeiro</title>
+    <meta name="theme-color" content="#168255" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Finup" />
+    <title>Finup</title>
+    <link rel="icon" type="image/png" href="/finup-favicon.png" />
+    <link rel="apple-touch-icon" href="/finup-logo.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main class="app-shell">
+    <section id="auth-screen" class="auth-screen">
+      <form id="auth-form" class="auth-card">
+        <div class="brand">
+          <img class="brand-mark" src="/finup-logo.png" alt="" />
+          <div>
+            <strong>Finup</strong>
+            <span>entrar na conta</span>
+          </div>
+        </div>
+        <label id="auth-name-field">
+          <span>Nome</span>
+          <input id="auth-name" type="text" autocomplete="name" placeholder="Seu nome" />
+        </label>
+        <label id="auth-email-field">
+          <span>E-mail</span>
+          <input id="auth-email" type="email" autocomplete="email" required />
+        </label>
+        <label id="auth-password-field">
+          <span>Senha</span>
+          <input id="auth-password" type="password" autocomplete="current-password" required />
+        </label>
+        <label id="auth-remember-field" class="remember-row">
+          <input id="auth-remember" type="checkbox" checked />
+          <span>Permanecer logado</span>
+        </label>
+        <p id="auth-error" class="form-error" hidden></p>
+        <div class="auth-actions">
+          <button type="submit" data-auth-action="login">Entrar</button>
+          <button type="button" data-auth-action="register">Criar conta</button>
+        </div>
+        <button id="forgot-password-button" class="link-button" type="button">Esqueci minha senha</button>
+        <button id="back-login-button" class="link-button" type="button" hidden>Voltar para entrar</button>
+        <p id="auth-help" class="form-help" hidden></p>
+      </form>
+    </section>
+
+    <main id="app-shell" class="app-shell" hidden>
       <header class="app-header">
         <div class="brand">
-          <span class="brand-mark">F</span>
+          <img class="brand-mark" src="/finup-logo.png" alt="" />
           <div>
-            <strong>Finanças</strong>
+            <strong>Finup</strong>
             <span>assistente pessoal</span>
           </div>
+        </div>
+        <div class="control-bar">
+          <span id="user-name" class="user-pill"></span>
+          <select id="control-select" title="Controle financeiro"></select>
+          <button id="new-control-button" type="button">Novo</button>
+          <button id="share-control-button" type="button">Compartilhar</button>
+          <button id="logout-button" type="button">Sair</button>
         </div>
       </header>
 
       <section class="workspace">
-        <aside class="sidebar panel-screen" data-panel="summary" aria-label="Resumo financeiro">
+        <aside class="sidebar panel-screen active" data-panel="summary" aria-label="Painel financeiro">
+          <header class="panel-hero">
+            <div>
+              <h1>Painel</h1>
+              <p>Acompanhe seus numeros e envie comprovantes rapidamente.</p>
+            </div>
+            <label class="upload-button" for="file-input" title="Enviar comprovante, boleto, nota ou extrato">
+              <span>Enviar arquivo</span>
+            </label>
+          </header>
+
           <div class="metric-grid">
             <article class="metric">
               <span>Receitas</span>
@@ -47,14 +106,13 @@
           </div>
         </aside>
 
-        <section class="chat-area panel-screen active" data-panel="chat" aria-label="Chat financeiro">
+        <section class="chat-area panel-screen" data-panel="chat" aria-label="Chat financeiro">
           <header class="topbar">
             <div>
               <h1>Assistente financeiro</h1>
               <p>Converse, envie comprovantes e acompanhe seus numeros.</p>
             </div>
-            <label class="upload-button" title="Enviar comprovante, boleto, nota ou extrato">
-              <input id="file-input" type="file" accept="image/*,.pdf,.txt,.csv" />
+            <label class="upload-button" for="file-input" title="Enviar comprovante, boleto, nota ou extrato">
               <span>Enviar arquivo</span>
             </label>
           </header>
@@ -93,11 +151,12 @@
       </section>
 
       <nav class="tabbar" aria-label="Navegação principal">
-        <button type="button" class="active" data-tab="chat">Chat</button>
+        <button type="button" class="active" data-tab="summary">Painel</button>
+        <button type="button" data-tab="chat">Chat</button>
         <button type="button" data-tab="review">Revisar <span id="pending-badge" class="badge" hidden>0</span></button>
-        <button type="button" data-tab="summary">Resumo</button>
         <button type="button" data-tab="files">Arquivos <span id="files-badge" class="badge" hidden>0</span></button>
       </nav>
+      <input id="file-input" class="file-input" type="file" accept="image/*,.pdf,.txt,.csv" />
     </main>
 
     <datalist id="category-options">

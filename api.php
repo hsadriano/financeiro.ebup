@@ -7,14 +7,95 @@ try {
     $env = load_env(__DIR__ . '/.env');
     $pdo = connect_db($env);
     ensure_schema($pdo);
-    $userId = ensure_default_user($pdo);
-    ensure_welcome_message($pdo, $userId);
 
     $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
     $path = trim((string)($_GET['path'] ?? ''), '/');
 
+    if ($method === 'GET' && $path === 'session') {
+        $session = current_session($pdo);
+        respond($session ? session_payload($pdo, $session) : ['user' => null, 'controls' => []]);
+    }
+
+    if ($method === 'POST' && $path === 'auth/register') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        $user = register_user($pdo, $body);
+        $controlId = create_control($pdo, (int)$user['id'], 'Meu controle financeiro');
+        create_login_session($pdo, (int)$user['id'], $controlId, (bool)($body['remember'] ?? true));
+        ensure_welcome_message($pdo, (int)$user['id'], $controlId);
+        respond(session_payload($pdo, ['user_id' => (int)$user['id'], 'active_control_id' => $controlId]));
+    }
+
+    if ($method === 'POST' && $path === 'auth/login') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        $user = authenticate_user($pdo, $body);
+        $controls = list_controls($pdo, (int)$user['id']);
+        $controlId = (int)($controls[0]['id'] ?? create_control($pdo, (int)$user['id'], 'Meu controle financeiro'));
+        create_login_session($pdo, (int)$user['id'], $controlId, (bool)($body['remember'] ?? true));
+        ensure_welcome_message($pdo, (int)$user['id'], $controlId);
+        respond(session_payload($pdo, ['user_id' => (int)$user['id'], 'active_control_id' => $controlId]));
+    }
+
+    if ($method === 'POST' && $path === 'auth/logout') {
+        logout($pdo);
+        respond(['ok' => true]);
+    }
+
+    if ($method === 'POST' && $path === 'auth/forgot') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        request_password_reset($pdo, $env, $body);
+        respond(['ok' => true]);
+    }
+
+    if ($method === 'POST' && $path === 'auth/reset') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        reset_password($pdo, $body);
+        respond(['ok' => true]);
+    }
+
+    $session = current_session($pdo);
+    if (!$session) {
+        respond(['error' => 'Nao autenticado'], 401);
+    }
+
+    $userId = (int)$session['user_id'];
+    $controlId = (int)$session['active_control_id'];
+    if (!user_can_access_control($pdo, $userId, $controlId)) {
+        $controls = list_controls($pdo, $userId);
+        if (!$controls) {
+            $controlId = create_control($pdo, $userId, 'Meu controle financeiro');
+        } else {
+            $controlId = (int)$controls[0]['id'];
+        }
+        set_active_control($pdo, $controlId);
+    }
+
     if ($method === 'GET' && $path === 'state') {
-        respond(build_state(read_data($pdo, $userId)));
+        respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
+    }
+
+    if ($method === 'POST' && $path === 'controls') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        $newControlId = create_control($pdo, $userId, trim((string)($body['name'] ?? 'Novo controle financeiro')));
+        set_active_control($pdo, $newControlId);
+        ensure_welcome_message($pdo, $userId, $newControlId);
+        respond(session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $newControlId]));
+    }
+
+    if ($method === 'POST' && $path === 'controls/select') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        $selectedControlId = (int)($body['controlId'] ?? 0);
+        if (!$selectedControlId || !user_can_access_control($pdo, $userId, $selectedControlId)) {
+            respond(['error' => 'Controle financeiro indisponivel'], 403);
+        }
+        set_active_control($pdo, $selectedControlId);
+        ensure_welcome_message($pdo, $userId, $selectedControlId);
+        respond(session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $selectedControlId]));
+    }
+
+    if ($method === 'POST' && $path === 'controls/share') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        share_control($pdo, $userId, $controlId, trim((string)($body['email'] ?? '')));
+        respond(session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId]));
     }
 
     if ($method === 'POST' && $path === 'chat') {
@@ -24,41 +105,41 @@ try {
             respond(['error' => 'Mensagem vazia'], 400);
         }
 
-        add_message($pdo, $userId, 'user', $message);
+        add_message($pdo, $userId, $controlId, 'user', $message);
         $parsed = parse_financial_message($message, $env);
 
         if ($parsed['intent'] === 'transaction') {
             $transaction = $parsed['transaction'];
             $transaction['status'] = 'pending';
-            $saved = add_transaction($pdo, $userId, $transaction);
+            $saved = add_transaction($pdo, $userId, $controlId, $transaction);
             $assistant = summarize_transaction($saved) . ' Confira os dados e confirme para salvar nos relatorios.';
         } else {
             $assistant = $parsed['answer'];
         }
 
-        add_message($pdo, $userId, 'assistant', $assistant);
-        respond(build_state(read_data($pdo, $userId)));
+        add_message($pdo, $userId, $controlId, 'assistant', $assistant);
+        respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
     }
 
     if ($method === 'POST' && preg_match('#^transactions/([^/]+)/(confirm|dismiss|update)$#', $path, $matches)) {
         if ($matches[2] === 'update') {
             $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
-            $updated = update_transaction($pdo, $userId, $matches[1], normalize_transaction_changes($body));
+            $updated = update_transaction($pdo, $userId, $controlId, $matches[1], normalize_transaction_changes($body));
             if (!$updated) {
                 respond(['error' => 'Lancamento nao encontrado'], 404);
             }
-            respond(build_state(read_data($pdo, $userId)));
+            respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
         }
 
         $status = $matches[2] === 'confirm' ? 'confirmed' : 'dismissed';
-        $updated = update_transaction_status($pdo, $userId, $matches[1], $status);
+        $updated = update_transaction_status($pdo, $userId, $controlId, $matches[1], $status);
         if (!$updated) {
             respond(['error' => 'Lancamento nao encontrado'], 404);
         }
 
         $verb = $matches[2] === 'confirm' ? 'confirmado' : 'descartado';
-        add_message($pdo, $userId, 'assistant', "Lancamento {$verb}: {$updated['description']}");
-        respond(build_state(read_data($pdo, $userId)));
+        add_message($pdo, $userId, $controlId, 'assistant', "Lancamento {$verb}: {$updated['description']}");
+        respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
     }
 
     if ($method === 'POST' && $path === 'upload') {
@@ -73,34 +154,40 @@ try {
 
         $file = $_FILES['file'];
         $originalName = basename((string)$file['name']);
-        $extension = pathinfo($originalName, PATHINFO_EXTENSION);
-        $storedName = time() . '-' . bin2hex(random_bytes(12)) . ($extension ? ".{$extension}" : '.bin');
+        $objectName = build_upload_object_name($controlId, $originalName);
+        $storedName = $objectName;
         $target = "{$uploadDir}/{$storedName}";
+        $targetDir = dirname($target);
+        if (!is_dir($targetDir)) {
+            mkdir($targetDir, 0755, true);
+        }
 
         if (!move_uploaded_file((string)$file['tmp_name'], $target)) {
             respond(['error' => 'Falha ao salvar upload'], 500);
         }
 
-        add_document($pdo, $userId, [
+        $mimeType = (string)($file['type'] ?: 'application/octet-stream');
+        $storedName = upload_to_google_cloud_storage($env, $target, $objectName, $mimeType);
+
+        add_document($pdo, $userId, $controlId, [
             'originalName' => $originalName,
             'storedName' => $storedName,
-            'mimeType' => (string)($file['type'] ?: 'application/octet-stream'),
+            'mimeType' => $mimeType,
             'status' => 'ocr_pending',
         ]);
 
         $message = "Recebi o arquivo \"{$originalName}\". ";
-        $mimeType = (string)($file['type'] ?: 'application/octet-stream');
         $documentId = (int)$pdo->lastInsertId();
         $parsed = parse_image_with_openai($target, $mimeType, $originalName, $env);
 
         if (($parsed['intent'] ?? '') === 'transaction') {
             $transaction = $parsed['transaction'];
             $transaction['status'] = 'pending';
-            $saved = add_transaction($pdo, $userId, $transaction);
-            update_document_status($pdo, $userId, $documentId, 'review_pending');
+            $saved = add_transaction($pdo, $userId, $controlId, $transaction);
+            update_document_status($pdo, $userId, $controlId, $documentId, 'review_pending');
             $message .= summarize_transaction($saved) . ' Confira os dados extraidos por OCR antes de confirmar.';
         } elseif (str_starts_with($mimeType, 'image/') && trim((string)($env['OPENAI_API_KEY'] ?? '')) !== '') {
-            update_document_status($pdo, $userId, $documentId, 'failed');
+            update_document_status($pdo, $userId, $controlId, $documentId, 'failed');
             $message .= 'Tentei fazer OCR, mas nao consegui encontrar uma transacao financeira com seguranca.';
         } elseif (str_starts_with($mimeType, 'image/')) {
             $message .= 'Para fazer OCR automaticamente, configure OPENAI_API_KEY no .env.';
@@ -108,8 +195,8 @@ try {
             $message .= 'Por enquanto o OCR automatico esta habilitado para imagens. PDF fica salvo para a proxima etapa.';
         }
 
-        add_message($pdo, $userId, 'assistant', $message);
-        respond(build_state(read_data($pdo, $userId)));
+        add_message($pdo, $userId, $controlId, 'assistant', $message);
+        respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
     }
 
     respond(['error' => 'Not found'], 404);
@@ -130,9 +217,167 @@ function load_env(string $path): array
             continue;
         }
         [$key, $value] = explode('=', $line, 2);
-        $env[trim($key)] = trim($value);
+        $env[trim($key)] = unquote_env_value(trim($value));
     }
     return $env;
+}
+
+function unquote_env_value(string $value): string
+{
+    if (strlen($value) >= 2) {
+        $first = $value[0];
+        $last = $value[strlen($value) - 1];
+        if (($first === '"' && $last === '"') || ($first === "'" && $last === "'")) {
+            return substr($value, 1, -1);
+        }
+    }
+    return $value;
+}
+
+function build_upload_object_name(int $controlId, string $originalName): string
+{
+    $extension = pathinfo($originalName, PATHINFO_EXTENSION);
+    $safeExtension = $extension !== '' ? preg_replace('/[^a-zA-Z0-9]/', '', $extension) : 'bin';
+    return 'controls/' . $controlId . '/documents/' . date('Y-m-d') . '/' . time() . '-' . bin2hex(random_bytes(12)) . '.' . $safeExtension;
+}
+
+function upload_to_google_cloud_storage(array $env, string $path, string $objectName, string $mimeType): string
+{
+    $bucket = trim((string)($env['GOOGLE_CLOUD_BUCKET_NAME'] ?? ''));
+    if ($bucket === '') {
+        return $objectName;
+    }
+
+    $credentials = load_google_credentials($env);
+    if ($credentials === null) {
+        return $objectName;
+    }
+
+    $token = google_access_token($credentials);
+    $url = 'https://storage.googleapis.com/upload/storage/v1/b/' . rawurlencode($bucket) . '/o?' . http_build_query([
+        'uploadType' => 'media',
+        'name' => $objectName,
+    ]);
+
+    $content = file_get_contents($path);
+    if ($content === false) {
+        throw new RuntimeException('Falha ao ler arquivo para envio ao Google Cloud Storage.');
+    }
+
+    $curl = curl_init($url);
+    curl_setopt_array($curl, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => [
+            "Authorization: Bearer {$token}",
+            "Content-Type: {$mimeType}",
+            'Content-Length: ' . strlen($content),
+        ],
+        CURLOPT_POSTFIELDS => $content,
+        CURLOPT_TIMEOUT => 30,
+    ]);
+
+    $raw = curl_exec($curl);
+    $status = (int)curl_getinfo($curl, CURLINFO_HTTP_CODE);
+    curl_close($curl);
+    if ($raw === false || $status < 200 || $status >= 300) {
+        throw new RuntimeException("Falha ao enviar arquivo para o Google Cloud Storage ({$status}). " . (string)$raw);
+    }
+
+    return "gs://{$bucket}/{$objectName}";
+}
+
+function load_google_credentials(array $env): ?array
+{
+    $explicitPath = trim((string)($env['GOOGLE_CLOUD_CREDENTIALS_FILE'] ?? ''));
+    if ($explicitPath !== '') {
+        $path = str_starts_with($explicitPath, '/') ? $explicitPath : __DIR__ . '/' . $explicitPath;
+        if (!is_file($path)) {
+            throw new RuntimeException('Arquivo de credenciais do Google Cloud nao encontrado.');
+        }
+        $credentials = json_decode((string)file_get_contents($path), true);
+        return is_array($credentials) ? $credentials : null;
+    }
+
+    $keysDir = __DIR__ . '/app/config/keys';
+    if (!is_dir($keysDir)) {
+        return null;
+    }
+
+    $files = glob($keysDir . '/*.json') ?: [];
+    if (!$files) {
+        return null;
+    }
+
+    $credentials = json_decode((string)file_get_contents($files[0]), true);
+    return is_array($credentials) ? $credentials : null;
+}
+
+function google_access_token(array $credentials): string
+{
+    static $cache = null;
+    $now = time();
+    if (is_array($cache) && (int)$cache['expires_at'] > $now + 60) {
+        return (string)$cache['token'];
+    }
+
+    $assertion = sign_google_jwt($credentials, $now);
+    $curl = curl_init('https://oauth2.googleapis.com/token');
+    curl_setopt_array($curl, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/x-www-form-urlencoded'],
+        CURLOPT_POSTFIELDS => http_build_query([
+            'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+            'assertion' => $assertion,
+        ]),
+        CURLOPT_TIMEOUT => 20,
+    ]);
+
+    $raw = curl_exec($curl);
+    $status = (int)curl_getinfo($curl, CURLINFO_HTTP_CODE);
+    curl_close($curl);
+    if ($raw === false || $status < 200 || $status >= 300) {
+        throw new RuntimeException("Falha ao autenticar no Google Cloud ({$status}). " . (string)$raw);
+    }
+
+    $payload = json_decode((string)$raw, true);
+    if (!is_array($payload) || empty($payload['access_token'])) {
+        throw new RuntimeException('Resposta invalida da autenticacao do Google Cloud.');
+    }
+
+    $cache = [
+        'token' => (string)$payload['access_token'],
+        'expires_at' => $now + (int)($payload['expires_in'] ?? 3600),
+    ];
+    return (string)$cache['token'];
+}
+
+function sign_google_jwt(array $credentials, int $now): string
+{
+    $header = ['alg' => 'RS256', 'typ' => 'JWT'];
+    $claim = [
+        'iss' => (string)($credentials['client_email'] ?? ''),
+        'scope' => 'https://www.googleapis.com/auth/devstorage.read_write',
+        'aud' => 'https://oauth2.googleapis.com/token',
+        'exp' => $now + 3600,
+        'iat' => $now,
+    ];
+
+    $unsigned = base64_url_encode(json_encode($header, JSON_UNESCAPED_SLASHES)) . '.' .
+        base64_url_encode(json_encode($claim, JSON_UNESCAPED_SLASHES));
+
+    $signature = '';
+    $privateKey = (string)($credentials['private_key'] ?? '');
+    if ($privateKey === '' || !openssl_sign($unsigned, $signature, $privateKey, OPENSSL_ALGO_SHA256)) {
+        throw new RuntimeException('Falha ao assinar autenticacao do Google Cloud.');
+    }
+    return $unsigned . '.' . base64_url_encode($signature);
+}
+
+function base64_url_encode(string $content): string
+{
+    return rtrim(strtr(base64_encode($content), '+/', '-_'), '=');
 }
 
 function connect_db(array $env): PDO
@@ -164,13 +409,51 @@ function ensure_schema(PDO $pdo): void
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )");
 
+    $pdo->exec("CREATE TABLE IF NOT EXISTS financial_controls (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(160) NOT NULL,
+        owner_user_id BIGINT UNSIGNED NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_controls_owner (owner_user_id)
+    )");
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS control_members (
+        control_id BIGINT UNSIGNED NOT NULL,
+        user_id BIGINT UNSIGNED NOT NULL,
+        role ENUM('owner', 'editor', 'viewer') NOT NULL DEFAULT 'editor',
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (control_id, user_id),
+        INDEX idx_members_user (user_id)
+    )");
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS user_sessions (
+        token_hash CHAR(64) NOT NULL PRIMARY KEY,
+        user_id BIGINT UNSIGNED NOT NULL,
+        active_control_id BIGINT UNSIGNED NULL,
+        expires_at DATETIME NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_sessions_user (user_id),
+        INDEX idx_sessions_expires (expires_at)
+    )");
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        token_hash CHAR(64) NOT NULL PRIMARY KEY,
+        user_id BIGINT UNSIGNED NOT NULL,
+        expires_at DATETIME NOT NULL,
+        used_at DATETIME NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_reset_user (user_id),
+        INDEX idx_reset_expires (expires_at)
+    )");
+
     $pdo->exec("CREATE TABLE IF NOT EXISTS categories (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        control_id BIGINT UNSIGNED NULL,
         user_id BIGINT UNSIGNED NULL,
         name VARCHAR(120) NOT NULL,
         kind ENUM('income', 'expense') NOT NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY uq_categories_user_name_kind (user_id, name, kind)
+        UNIQUE KEY uq_categories_control_name_kind (control_id, name, kind)
     )");
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS financial_accounts (
@@ -184,6 +467,7 @@ function ensure_schema(PDO $pdo): void
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS transactions (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        control_id BIGINT UNSIGNED NULL,
         user_id BIGINT UNSIGNED NOT NULL,
         account_id BIGINT UNSIGNED NULL,
         category_id BIGINT UNSIGNED NULL,
@@ -209,6 +493,7 @@ function ensure_schema(PDO $pdo): void
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS documents (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        control_id BIGINT UNSIGNED NULL,
         user_id BIGINT UNSIGNED NOT NULL,
         original_name VARCHAR(255) NOT NULL,
         stored_name VARCHAR(255) NOT NULL,
@@ -221,37 +506,421 @@ function ensure_schema(PDO $pdo): void
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS chat_messages (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        control_id BIGINT UNSIGNED NULL,
         user_id BIGINT UNSIGNED NOT NULL,
         role ENUM('user', 'assistant', 'system') NOT NULL,
         content TEXT NOT NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_chat_user_created (user_id, created_at)
     )");
+
+    add_column_if_missing($pdo, 'categories', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
+    add_column_if_missing($pdo, 'transactions', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
+    add_column_if_missing($pdo, 'documents', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
+    add_column_if_missing($pdo, 'chat_messages', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
+    migrate_default_control($pdo);
+    ensure_category_unique_index($pdo);
 }
 
-function ensure_default_user(PDO $pdo): int
+function add_column_if_missing(PDO $pdo, string $table, string $column, string $definition): void
+{
+    try {
+        $pdo->exec("ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
+    } catch (Throwable $error) {
+        if (!str_contains($error->getMessage(), 'Duplicate column')) {
+            throw $error;
+        }
+    }
+}
+
+function migrate_default_control(PDO $pdo): void
 {
     $stmt = $pdo->prepare('INSERT IGNORE INTO users (name, email) VALUES (?, ?)');
     $stmt->execute(['Usuario principal', 'usuario@local']);
     $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
     $stmt->execute(['usuario@local']);
-    return (int)$stmt->fetchColumn();
+    $userId = (int)$stmt->fetchColumn();
+
+    $stmt = $pdo->prepare('SELECT id FROM financial_controls WHERE owner_user_id = ? ORDER BY id LIMIT 1');
+    $stmt->execute([$userId]);
+    $controlId = (int)$stmt->fetchColumn();
+    if (!$controlId) {
+        $stmt = $pdo->prepare('INSERT INTO financial_controls (name, owner_user_id) VALUES (?, ?)');
+        $stmt->execute(['Meu controle financeiro', $userId]);
+        $controlId = (int)$pdo->lastInsertId();
+    }
+    $stmt = $pdo->prepare('INSERT IGNORE INTO control_members (control_id, user_id, role) VALUES (?, ?, ?)');
+    $stmt->execute([$controlId, $userId, 'owner']);
+
+    foreach (['categories', 'transactions', 'documents', 'chat_messages'] as $table) {
+        $pdo->prepare("UPDATE {$table} SET control_id = ? WHERE control_id IS NULL")->execute([$controlId]);
+    }
 }
 
-function ensure_welcome_message(PDO $pdo, int $userId): void
+function ensure_category_unique_index(PDO $pdo): void
 {
-    $stmt = $pdo->prepare('SELECT id FROM chat_messages WHERE user_id = ? LIMIT 1');
-    $stmt->execute([$userId]);
+    try {
+        $pdo->exec('ALTER TABLE categories DROP INDEX uq_categories_user_name_kind');
+    } catch (Throwable $error) {
+        if (!str_contains($error->getMessage(), 'check that')) {
+            throw $error;
+        }
+    }
+
+    try {
+        $pdo->exec('ALTER TABLE categories ADD UNIQUE KEY uq_categories_control_name_kind (control_id, name, kind)');
+    } catch (Throwable $error) {
+        if (str_contains($error->getMessage(), 'Duplicate entry')) {
+            dedupe_categories($pdo);
+            $pdo->exec('ALTER TABLE categories ADD UNIQUE KEY uq_categories_control_name_kind (control_id, name, kind)');
+            return;
+        }
+        if (!str_contains($error->getMessage(), 'Duplicate key name')) {
+            throw $error;
+        }
+    }
+}
+
+function dedupe_categories(PDO $pdo): void
+{
+    $pdo->exec("UPDATE transactions t
+        INNER JOIN categories c ON c.id = t.category_id
+        INNER JOIN (
+            SELECT MIN(id) AS keep_id, control_id, name, kind
+            FROM categories
+            GROUP BY control_id, name, kind
+        ) keeper ON keeper.control_id <=> c.control_id AND keeper.name = c.name AND keeper.kind = c.kind
+        SET t.category_id = keeper.keep_id
+        WHERE c.id <> keeper.keep_id");
+
+    $pdo->exec("DELETE c FROM categories c
+        INNER JOIN (
+            SELECT MIN(id) AS keep_id, control_id, name, kind
+            FROM categories
+            GROUP BY control_id, name, kind
+        ) keeper ON keeper.control_id <=> c.control_id AND keeper.name = c.name AND keeper.kind = c.kind
+        WHERE c.id <> keeper.keep_id");
+}
+
+function ensure_welcome_message(PDO $pdo, int $userId, int $controlId): void
+{
+    $stmt = $pdo->prepare('SELECT id FROM chat_messages WHERE user_id = ? AND control_id = ? LIMIT 1');
+    $stmt->execute([$userId, $controlId]);
     if ($stmt->fetchColumn()) {
         return;
     }
-    add_message($pdo, $userId, 'assistant', 'Me diga uma despesa, receita ou conta a pagar. Tambem posso receber um comprovante ou boleto por upload.');
+    add_message($pdo, $userId, $controlId, 'assistant', 'Me diga uma despesa, receita ou conta a pagar. Tambem posso receber um comprovante ou boleto por upload.');
 }
 
-function read_data(PDO $pdo, int $userId): array
+function register_user(PDO $pdo, array $body): array
 {
-    $stmt = $pdo->prepare('SELECT CAST(id AS CHAR) AS id, role, content, created_at AS createdAt FROM chat_messages WHERE user_id = ? ORDER BY created_at ASC, id ASC');
+    $name = trim((string)($body['name'] ?? ''));
+    $email = strtolower(trim((string)($body['email'] ?? '')));
+    $password = (string)($body['password'] ?? '');
+    if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 6) {
+        respond(['error' => 'Informe nome, e-mail valido e senha com pelo menos 6 caracteres.'], 400);
+    }
+
+    $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
+    $stmt->execute([$email]);
+    if ($stmt->fetchColumn()) {
+        respond(['error' => 'Este e-mail ja esta cadastrado.'], 409);
+    }
+
+    $stmt = $pdo->prepare('INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)');
+    $stmt->execute([$name, $email, hash_password($password)]);
+    return ['id' => (int)$pdo->lastInsertId(), 'name' => $name, 'email' => $email];
+}
+
+function authenticate_user(PDO $pdo, array $body): array
+{
+    $email = strtolower(trim((string)($body['email'] ?? '')));
+    $password = (string)($body['password'] ?? '');
+    $stmt = $pdo->prepare('SELECT id, name, email, password_hash FROM users WHERE email = ? LIMIT 1');
+    $stmt->execute([$email]);
+    $user = $stmt->fetch();
+    if (!$user || !$user['password_hash'] || !verify_password($password, (string)$user['password_hash'])) {
+        respond(['error' => 'E-mail ou senha invalidos.'], 401);
+    }
+    return $user;
+}
+
+function hash_password(string $password): string
+{
+    $iterations = 210000;
+    $salt = bin2hex(random_bytes(16));
+    $hash = hash_pbkdf2('sha256', $password, $salt, $iterations, 64);
+    return "pbkdf2_sha256:{$iterations}:{$salt}:{$hash}";
+}
+
+function verify_password(string $password, string $storedHash): bool
+{
+    if (str_starts_with($storedHash, 'pbkdf2_sha256:')) {
+        $parts = explode(':', $storedHash);
+        if (count($parts) !== 4) {
+            return false;
+        }
+        [, $iterations, $salt, $expected] = $parts;
+        $actual = hash_pbkdf2('sha256', $password, $salt, (int)$iterations, 64);
+        return hash_equals($expected, $actual);
+    }
+
+    return password_verify($password, $storedHash);
+}
+
+function request_password_reset(PDO $pdo, array $env, array $body): void
+{
+    $email = strtolower(trim((string)($body['email'] ?? '')));
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        return;
+    }
+
+    $stmt = $pdo->prepare('SELECT id, name, email FROM users WHERE email = ? LIMIT 1');
+    $stmt->execute([$email]);
+    $user = $stmt->fetch();
+    if (!$user) {
+        return;
+    }
+
+    $stmt = $pdo->prepare('DELETE FROM password_reset_tokens WHERE user_id = ? AND (used_at IS NOT NULL OR expires_at <= NOW())');
+    $stmt->execute([(int)$user['id']]);
+
+    $token = rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '=');
+    $expires = time() + 60 * 60;
+    $stmt = $pdo->prepare('INSERT INTO password_reset_tokens (token_hash, user_id, expires_at) VALUES (?, ?, FROM_UNIXTIME(?))');
+    $stmt->execute([hash('sha256', $token), (int)$user['id'], $expires]);
+
+    $resetUrl = request_origin() . '/?reset=' . rawurlencode($token);
+    send_mail($env, [
+        'to' => (string)$user['email'],
+        'subject' => 'Redefinicao de senha do Finup',
+        'text' => implode("\n", [
+            'Ola, ' . (string)$user['name'] . '.',
+            '',
+            'Recebemos uma solicitacao para redefinir sua senha no Finup.',
+            'Use este link para criar uma nova senha: ' . $resetUrl,
+            '',
+            'Este link expira em 1 hora. Se voce nao solicitou, ignore este e-mail.',
+        ]),
+    ]);
+}
+
+function reset_password(PDO $pdo, array $body): void
+{
+    $token = trim((string)($body['token'] ?? ''));
+    $password = (string)($body['password'] ?? '');
+    if ($token === '' || strlen($password) < 6) {
+        respond(['error' => 'Link invalido ou senha muito curta.'], 400);
+    }
+
+    $stmt = $pdo->prepare('SELECT user_id FROM password_reset_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > NOW() LIMIT 1');
+    $stmt->execute([hash('sha256', $token)]);
+    $reset = $stmt->fetch();
+    if (!$reset) {
+        respond(['error' => 'Link invalido ou expirado.'], 400);
+    }
+
+    $userId = (int)$reset['user_id'];
+    $stmt = $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?');
+    $stmt->execute([hash_password($password), $userId]);
+    $stmt = $pdo->prepare('UPDATE password_reset_tokens SET used_at = NOW() WHERE token_hash = ?');
+    $stmt->execute([hash('sha256', $token)]);
+    $stmt = $pdo->prepare('DELETE FROM user_sessions WHERE user_id = ?');
     $stmt->execute([$userId]);
+}
+
+function request_origin(): string
+{
+    $host = (string)($_SERVER['HTTP_HOST'] ?? 'localhost');
+    $proto = (string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? (!empty($_SERVER['HTTPS']) ? 'https' : 'http'));
+    return $proto . '://' . $host;
+}
+
+function send_mail(array $env, array $message): void
+{
+    $host = trim((string)($env['MAIL_HOST'] ?? ''));
+    $port = (int)($env['MAIL_PORT'] ?? 465);
+    $username = trim((string)($env['MAIL_USERNAME'] ?? ''));
+    $password = (string)($env['MAIL_PASSWORD'] ?? '');
+    $fromEmail = trim((string)($env['MAIL_FROM_EMAIL'] ?? $username));
+    $fromName = trim((string)($env['MAIL_FROM_NAME'] ?? 'Finup')) ?: 'Finup';
+    if ($host === '' || $username === '' || $password === '' || $fromEmail === '') {
+        throw new RuntimeException('Configuracao de e-mail incompleta.');
+    }
+
+    $socket = stream_socket_client("ssl://{$host}:{$port}", $errno, $errstr, 20);
+    if (!$socket) {
+        throw new RuntimeException("Falha ao conectar no SMTP: {$errstr}");
+    }
+    stream_set_timeout($socket, 20);
+
+    smtp_read($socket);
+    smtp_command($socket, "EHLO {$host}");
+    smtp_command($socket, 'AUTH LOGIN');
+    smtp_command($socket, base64_encode($username));
+    smtp_command($socket, base64_encode($password));
+    smtp_command($socket, "MAIL FROM:<{$fromEmail}>");
+    smtp_command($socket, 'RCPT TO:<' . (string)$message['to'] . '>');
+    smtp_command($socket, 'DATA', [354]);
+    fwrite($socket, build_email_message($fromEmail, $fromName, (string)$message['to'], (string)$message['subject'], (string)$message['text']));
+    smtp_read($socket);
+    smtp_command($socket, 'QUIT');
+    fclose($socket);
+}
+
+function smtp_command($socket, string $command, array $acceptedCodes = [200, 220, 221, 235, 250, 251, 334, 354]): string
+{
+    fwrite($socket, $command . "\r\n");
+    $response = smtp_read($socket);
+    $code = (int)substr($response, 0, 3);
+    if (!in_array($code, $acceptedCodes, true)) {
+        throw new RuntimeException('Erro SMTP: ' . trim($response));
+    }
+    return $response;
+}
+
+function smtp_read($socket): string
+{
+    $response = '';
+    while (($line = fgets($socket, 515)) !== false) {
+        $response .= $line;
+        if (preg_match('/^\d{3} /', $line)) {
+            break;
+        }
+    }
+    $code = (int)substr($response, 0, 3);
+    if ($code >= 400) {
+        throw new RuntimeException('Erro SMTP: ' . trim($response));
+    }
+    return $response;
+}
+
+function build_email_message(string $fromEmail, string $fromName, string $to, string $subject, string $text): string
+{
+    $headers = [
+        'From: ' . encode_mail_header($fromName) . " <{$fromEmail}>",
+        "To: <{$to}>",
+        'Subject: ' . encode_mail_header($subject),
+        'MIME-Version: 1.0',
+        'Content-Type: text/plain; charset=UTF-8',
+        'Content-Transfer-Encoding: 8bit',
+    ];
+    $escapedText = str_replace("\n.", "\n..", $text);
+    return implode("\r\n", $headers) . "\r\n\r\n" . $escapedText . "\r\n.\r\n";
+}
+
+function encode_mail_header(string $value): string
+{
+    return '=?UTF-8?B?' . base64_encode($value) . '?=';
+}
+
+function create_login_session(PDO $pdo, int $userId, int $controlId, bool $remember): void
+{
+    $token = bin2hex(random_bytes(32));
+    $expires = time() + ($remember ? 60 * 60 * 24 * 45 : 60 * 60 * 8);
+    $stmt = $pdo->prepare('INSERT INTO user_sessions (token_hash, user_id, active_control_id, expires_at) VALUES (?, ?, ?, FROM_UNIXTIME(?))');
+    $stmt->execute([hash('sha256', $token), $userId, $controlId, $expires]);
+    setcookie('finance_session', $token, [
+        'expires' => $expires,
+        'path' => '/',
+        'httponly' => true,
+        'samesite' => 'Lax',
+        'secure' => !empty($_SERVER['HTTPS']),
+    ]);
+}
+
+function current_session(PDO $pdo): ?array
+{
+    $token = (string)($_COOKIE['finance_session'] ?? '');
+    if ($token === '') {
+        return null;
+    }
+    $stmt = $pdo->prepare('SELECT user_id, active_control_id FROM user_sessions WHERE token_hash = ? AND expires_at > NOW() LIMIT 1');
+    $stmt->execute([hash('sha256', $token)]);
+    $session = $stmt->fetch();
+    return $session ?: null;
+}
+
+function logout(PDO $pdo): void
+{
+    $token = (string)($_COOKIE['finance_session'] ?? '');
+    if ($token !== '') {
+        $stmt = $pdo->prepare('DELETE FROM user_sessions WHERE token_hash = ?');
+        $stmt->execute([hash('sha256', $token)]);
+    }
+    setcookie('finance_session', '', [
+        'expires' => time() - 3600,
+        'path' => '/',
+        'httponly' => true,
+        'samesite' => 'Lax',
+        'secure' => !empty($_SERVER['HTTPS']),
+    ]);
+}
+
+function create_control(PDO $pdo, int $userId, string $name): int
+{
+    $name = trim($name) ?: 'Novo controle financeiro';
+    $stmt = $pdo->prepare('INSERT INTO financial_controls (name, owner_user_id) VALUES (?, ?)');
+    $stmt->execute([mb_substr($name, 0, 160), $userId]);
+    $controlId = (int)$pdo->lastInsertId();
+    $stmt = $pdo->prepare('INSERT INTO control_members (control_id, user_id, role) VALUES (?, ?, ?)');
+    $stmt->execute([$controlId, $userId, 'owner']);
+    return $controlId;
+}
+
+function list_controls(PDO $pdo, int $userId): array
+{
+    $stmt = $pdo->prepare('SELECT CAST(c.id AS CHAR) AS id, c.name, m.role FROM financial_controls c INNER JOIN control_members m ON m.control_id = c.id WHERE m.user_id = ? ORDER BY c.name ASC');
+    $stmt->execute([$userId]);
+    return $stmt->fetchAll();
+}
+
+function user_can_access_control(PDO $pdo, int $userId, int $controlId): bool
+{
+    $stmt = $pdo->prepare('SELECT 1 FROM control_members WHERE user_id = ? AND control_id = ? LIMIT 1');
+    $stmt->execute([$userId, $controlId]);
+    return (bool)$stmt->fetchColumn();
+}
+
+function set_active_control(PDO $pdo, int $controlId): void
+{
+    $token = (string)($_COOKIE['finance_session'] ?? '');
+    if ($token === '') return;
+    $stmt = $pdo->prepare('UPDATE user_sessions SET active_control_id = ? WHERE token_hash = ?');
+    $stmt->execute([$controlId, hash('sha256', $token)]);
+}
+
+function share_control(PDO $pdo, int $ownerUserId, int $controlId, string $email): void
+{
+    if (!user_can_access_control($pdo, $ownerUserId, $controlId)) {
+        respond(['error' => 'Sem acesso ao controle financeiro.'], 403);
+    }
+    $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
+    $stmt->execute([strtolower($email)]);
+    $targetUserId = (int)$stmt->fetchColumn();
+    if (!$targetUserId) {
+        respond(['error' => 'Usuario nao encontrado. Ele precisa criar uma conta primeiro.'], 404);
+    }
+    $stmt = $pdo->prepare('INSERT IGNORE INTO control_members (control_id, user_id, role) VALUES (?, ?, ?)');
+    $stmt->execute([$controlId, $targetUserId, 'editor']);
+}
+
+function session_payload(PDO $pdo, array $session): array
+{
+    $stmt = $pdo->prepare('SELECT CAST(id AS CHAR) AS id, name, email FROM users WHERE id = ? LIMIT 1');
+    $stmt->execute([(int)$session['user_id']]);
+    $user = $stmt->fetch();
+    return [
+        'user' => $user,
+        'controls' => list_controls($pdo, (int)$session['user_id']),
+        'activeControlId' => isset($session['active_control_id']) ? (string)$session['active_control_id'] : null,
+    ];
+}
+
+function read_data(PDO $pdo, int $userId, int $controlId): array
+{
+    $stmt = $pdo->prepare('SELECT CAST(id AS CHAR) AS id, role, content, created_at AS createdAt FROM chat_messages WHERE control_id = ? ORDER BY created_at ASC, id ASC');
+    $stmt->execute([$controlId]);
     $messages = array_map('normalize_dates', $stmt->fetchAll());
 
     $stmt = $pdo->prepare("SELECT
@@ -271,32 +940,33 @@ function read_data(PDO $pdo, int $userId): array
         t.created_at AS createdAt
         FROM transactions t
         LEFT JOIN categories c ON c.id = t.category_id
-        WHERE t.user_id = ?
+        WHERE t.control_id = ?
         ORDER BY t.created_at DESC, t.id DESC");
-    $stmt->execute([$userId]);
+    $stmt->execute([$controlId]);
     $transactions = array_map('normalize_transaction', $stmt->fetchAll());
 
-    $stmt = $pdo->prepare('SELECT CAST(id AS CHAR) AS id, original_name AS originalName, stored_name AS storedName, mime_type AS mimeType, status, created_at AS createdAt FROM documents WHERE user_id = ? ORDER BY created_at DESC, id DESC');
-    $stmt->execute([$userId]);
+    $stmt = $pdo->prepare('SELECT CAST(id AS CHAR) AS id, original_name AS originalName, stored_name AS storedName, mime_type AS mimeType, status, created_at AS createdAt FROM documents WHERE control_id = ? ORDER BY created_at DESC, id DESC');
+    $stmt->execute([$controlId]);
     $documents = array_map('normalize_dates', $stmt->fetchAll());
 
     return compact('messages', 'transactions', 'documents');
 }
 
-function add_message(PDO $pdo, int $userId, string $role, string $content): void
+function add_message(PDO $pdo, int $userId, int $controlId, string $role, string $content): void
 {
-    $stmt = $pdo->prepare('INSERT INTO chat_messages (user_id, role, content) VALUES (?, ?, ?)');
-    $stmt->execute([$userId, $role, $content]);
+    $stmt = $pdo->prepare('INSERT INTO chat_messages (control_id, user_id, role, content) VALUES (?, ?, ?, ?)');
+    $stmt->execute([$controlId, $userId, $role, $content]);
 }
 
-function add_transaction(PDO $pdo, int $userId, array $transaction): array
+function add_transaction(PDO $pdo, int $userId, int $controlId, array $transaction): array
 {
-    $categoryId = ensure_category($pdo, $userId, $transaction['category'], $transaction['kind']);
+    $categoryId = ensure_category($pdo, $userId, $controlId, $transaction['category'], $transaction['kind']);
     $stmt = $pdo->prepare('INSERT INTO transactions (
-        user_id, category_id, kind, status, amount, description, merchant, payment_method,
+        control_id, user_id, category_id, kind, status, amount, description, merchant, payment_method,
         transaction_date, due_date, source, raw_text, confidence
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
     $stmt->execute([
+        $controlId,
         $userId,
         $categoryId,
         $transaction['kind'],
@@ -316,23 +986,23 @@ function add_transaction(PDO $pdo, int $userId, array $transaction): array
     return $transaction;
 }
 
-function add_document(PDO $pdo, int $userId, array $document): void
+function add_document(PDO $pdo, int $userId, int $controlId, array $document): void
 {
-    $stmt = $pdo->prepare('INSERT INTO documents (user_id, original_name, stored_name, mime_type, status) VALUES (?, ?, ?, ?, ?)');
-    $stmt->execute([$userId, $document['originalName'], $document['storedName'], $document['mimeType'], $document['status']]);
+    $stmt = $pdo->prepare('INSERT INTO documents (control_id, user_id, original_name, stored_name, mime_type, status) VALUES (?, ?, ?, ?, ?, ?)');
+    $stmt->execute([$controlId, $userId, $document['originalName'], $document['storedName'], $document['mimeType'], $document['status']]);
 }
 
-function update_document_status(PDO $pdo, int $userId, int $documentId, string $status): void
+function update_document_status(PDO $pdo, int $userId, int $controlId, int $documentId, string $status): void
 {
-    $stmt = $pdo->prepare('UPDATE documents SET status = ? WHERE id = ? AND user_id = ?');
-    $stmt->execute([$status, $documentId, $userId]);
+    $stmt = $pdo->prepare('UPDATE documents SET status = ? WHERE id = ? AND user_id = ? AND control_id = ?');
+    $stmt->execute([$status, $documentId, $userId, $controlId]);
 }
 
-function update_transaction_status(PDO $pdo, int $userId, string $id, string $status): ?array
+function update_transaction_status(PDO $pdo, int $userId, int $controlId, string $id, string $status): ?array
 {
-    $stmt = $pdo->prepare('UPDATE transactions SET status = ? WHERE id = ? AND user_id = ?');
-    $stmt->execute([$status, $id, $userId]);
-    $data = read_data($pdo, $userId);
+    $stmt = $pdo->prepare('UPDATE transactions SET status = ? WHERE id = ? AND user_id = ? AND control_id = ?');
+    $stmt->execute([$status, $id, $userId, $controlId]);
+    $data = read_data($pdo, $userId, $controlId);
     foreach ($data['transactions'] as $transaction) {
         if ($transaction['id'] === $id) {
             return $transaction;
@@ -341,9 +1011,9 @@ function update_transaction_status(PDO $pdo, int $userId, string $id, string $st
     return null;
 }
 
-function update_transaction(PDO $pdo, int $userId, string $id, array $changes): ?array
+function update_transaction(PDO $pdo, int $userId, int $controlId, string $id, array $changes): ?array
 {
-    $categoryId = ensure_category($pdo, $userId, $changes['category'], $changes['kind']);
+    $categoryId = ensure_category($pdo, $userId, $controlId, $changes['category'], $changes['kind']);
     $stmt = $pdo->prepare('UPDATE transactions
         SET kind = ?,
             category_id = ?,
@@ -353,7 +1023,7 @@ function update_transaction(PDO $pdo, int $userId, string $id, array $changes): 
             payment_method = ?,
             transaction_date = ?,
             due_date = ?
-        WHERE id = ? AND user_id = ? AND status = ?');
+        WHERE id = ? AND user_id = ? AND control_id = ? AND status = ?');
     $stmt->execute([
         $changes['kind'],
         $categoryId,
@@ -365,10 +1035,11 @@ function update_transaction(PDO $pdo, int $userId, string $id, array $changes): 
         $changes['dueDate'],
         $id,
         $userId,
+        $controlId,
         'pending',
     ]);
 
-    $data = read_data($pdo, $userId);
+    $data = read_data($pdo, $userId, $controlId);
     foreach ($data['transactions'] as $transaction) {
         if ($transaction['id'] === $id) {
             return $transaction;
@@ -377,17 +1048,17 @@ function update_transaction(PDO $pdo, int $userId, string $id, array $changes): 
     return null;
 }
 
-function ensure_category(PDO $pdo, int $userId, string $name, string $kind): int
+function ensure_category(PDO $pdo, int $userId, int $controlId, string $name, string $kind): int
 {
     $categoryKind = $kind === 'income' ? 'income' : 'expense';
-    $stmt = $pdo->prepare('INSERT IGNORE INTO categories (user_id, name, kind) VALUES (?, ?, ?)');
-    $stmt->execute([$userId, $name ?: 'Outros', $categoryKind]);
-    $stmt = $pdo->prepare('SELECT id FROM categories WHERE user_id = ? AND name = ? AND kind = ? LIMIT 1');
-    $stmt->execute([$userId, $name ?: 'Outros', $categoryKind]);
+    $stmt = $pdo->prepare('INSERT IGNORE INTO categories (control_id, user_id, name, kind) VALUES (?, ?, ?, ?)');
+    $stmt->execute([$controlId, $userId, $name ?: 'Outros', $categoryKind]);
+    $stmt = $pdo->prepare('SELECT id FROM categories WHERE control_id = ? AND name = ? AND kind = ? LIMIT 1');
+    $stmt->execute([$controlId, $name ?: 'Outros', $categoryKind]);
     return (int)$stmt->fetchColumn();
 }
 
-function build_state(array $data): array
+function build_state(array $data, array $sessionPayload): array
 {
     $month = date('Y-m');
     $confirmed = array_values(array_filter($data['transactions'], fn($item) => in_array($item['status'], ['confirmed', 'paid', 'scheduled'], true)));
@@ -402,6 +1073,7 @@ function build_state(array $data): array
         'transactions' => $confirmed,
         'pendingTransactions' => $pending,
         'documents' => $data['documents'],
+        'session' => $sessionPayload,
         'summary' => [
             'income' => $income,
             'expenses' => $expenses,

@@ -1,0 +1,24 @@
+{
+  "name": "Finup",
+  "short_name": "Finup",
+  "description": "Assistente financeiro pessoal",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f7f4",
+  "theme_color": "#168255",
+  "icons": [
+    {
+      "src": "/finup-logo.png",
+      "sizes": "1254x1254",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/finup-favicon.png",
+      "sizes": "1254x1254",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

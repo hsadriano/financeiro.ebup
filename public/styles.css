@@ -30,6 +30,112 @@ select {
   font: inherit;
 }
 
+[hidden] {
+  display: none !important;
+}
+
+.auth-screen {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  padding: 18px;
+  background: var(--bg);
+}
+
+.auth-card {
+  display: grid;
+  width: min(420px, 100%);
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.auth-card .brand {
+  justify-content: center;
+  margin-bottom: 6px;
+}
+
+.auth-card label {
+  display: grid;
+  gap: 5px;
+}
+
+.auth-card label span,
+.remember-row span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.auth-card input,
+.control-bar select {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 11px 10px;
+  color: var(--ink);
+  background: #fff;
+}
+
+.remember-row {
+  display: flex !important;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 8px !important;
+}
+
+.remember-row[hidden] {
+  display: none !important;
+}
+
+.auth-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.auth-actions:has(button[hidden]) {
+  grid-template-columns: 1fr;
+}
+
+.auth-actions button,
+.control-bar button {
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #fff;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.auth-actions button[type="submit"] {
+  color: #fff;
+  background: var(--green);
+  border-color: var(--green);
+}
+
+.form-error,
+.form-help {
+  color: var(--red);
+  font-weight: 700;
+}
+
+.form-help {
+  color: var(--green);
+}
+
+.link-button {
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  font-weight: 800;
+  cursor: pointer;
+}
+
 .app-shell {
   display: grid;
   grid-template-rows: auto 1fr auto;
@@ -41,7 +147,41 @@ select {
 .app-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   min-height: 46px;
+}
+
+.control-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.user-pill {
+  max-width: 180px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 8px 10px;
+  color: var(--ink);
+  background: #fff;
+  font-size: 0.82rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.control-bar select {
+  width: min(280px, 34vw);
+  padding-block: 9px;
+}
+
+.control-bar button {
+  min-height: 38px;
+  padding: 0 10px;
+  white-space: nowrap;
 }
 
 .workspace {
@@ -73,14 +213,10 @@ select {
 }
 
 .brand-mark {
-  display: grid;
   width: 38px;
   height: 38px;
-  place-items: center;
   border-radius: 8px;
-  color: #fff;
-  background: var(--green);
-  font-weight: 800;
+  object-fit: cover;
 }
 
 .brand strong,
@@ -101,6 +237,19 @@ select {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+
+.panel-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.panel-hero p {
+  margin-top: 4px;
+  color: var(--muted);
 }
 
 .metric {
@@ -190,6 +339,14 @@ h2 {
   inline-size: 1px;
   block-size: 1px;
   opacity: 0;
+}
+
+.file-input {
+  position: fixed;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .messages {
@@ -512,20 +669,53 @@ h2 {
     font-size: 0.78rem;
   }
 
+  .app-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .control-bar {
+    display: grid;
+    grid-template-columns: 1fr auto auto auto;
+  }
+
+  .user-pill {
+    grid-column: 1 / -1;
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .control-bar select {
+    width: 100%;
+  }
+
+  .control-bar button {
+    padding: 0 8px;
+    font-size: 0.78rem;
+  }
+
+  .auth-actions {
+    grid-template-columns: 1fr;
+  }
+
   .chat-area,
   .sidebar,
   .ledger,
   .files-panel {
-    min-height: calc(100dvh - 142px);
-    max-height: calc(100dvh - 142px);
+    min-height: calc(100dvh - 196px);
+    max-height: calc(100dvh - 196px);
   }
 
   .messages {
-    max-height: calc(100dvh - 312px);
+    max-height: calc(100dvh - 366px);
   }
 
   .topbar {
     align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .panel-hero {
     flex-direction: column;
   }
 

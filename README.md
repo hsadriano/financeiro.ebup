@@ -95,6 +95,39 @@ Com `OPENAI_API_KEY` configurada, uploads `image/*` sao analisados automaticamen
 
 PDFs ainda ficam salvos como pendentes; a leitura automatica de PDF entra na proxima etapa.
 
+## Google Cloud Storage
+
+Para armazenar uploads no bucket do Google Cloud Storage, configure:
+
+```text
+GOOGLE_CLOUD_PROJECT_ID=atzcredja
+GOOGLE_CLOUD_BUCKET_NAME=atz-finup
+GOOGLE_CLOUD_CREDENTIALS_FILE=
+```
+
+Quando `GOOGLE_CLOUD_CREDENTIALS_FILE` estiver vazio, o app procura automaticamente o JSON da service account em:
+
+```text
+app/config/keys/*.json
+```
+
+Os arquivos `.json` dessa pasta ficam fora do Git. Se as credenciais não estiverem presentes, o upload continua funcionando localmente em `uploads/`.
+
+## Recuperação de senha por e-mail
+
+Para habilitar o fluxo "Esqueci minha senha", configure SMTP no `.env`:
+
+```text
+MAIL_HOST=smtp.hostinger.com
+MAIL_PORT=465
+MAIL_USERNAME=nao-responda@ebup.com.br
+MAIL_PASSWORD=sua_senha_smtp
+MAIL_FROM_EMAIL=nao-responda@ebup.com.br
+MAIL_FROM_NAME=Finup
+```
+
+O link enviado por e-mail expira em 1 hora e o token é salvo no banco apenas como hash.
+
 ## Exemplos de mensagens
 
 ```text
