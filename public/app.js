@@ -159,11 +159,19 @@ async function loadSession() {
 
 async function loadState() {
   const response = await fetch("/api/state");
-  if (response.status === 401) {
+  if (response.status === 401 || response.status === 403) {
     showAuth();
     return;
   }
   const data = await response.json();
+  if (!response.ok || !data?.summary) {
+    if (!state.session?.user) {
+      showAuth();
+      return;
+    }
+    showAuthError(data?.error || "Nao consegui carregar os dados agora.");
+    return;
+  }
   render(data);
 }
 
