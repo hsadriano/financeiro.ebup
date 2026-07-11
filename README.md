@@ -82,7 +82,7 @@ O app usa um parser local por regras como fallback. Para melhorar o entendimento
 
 ```text
 OPENAI_API_KEY=sua_chave
-OPENAI_MODEL=gpt-4.1-mini
+OPENAI_MODEL=gpt-4.1-nano
 OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 

@@ -441,7 +441,7 @@ function parse_with_openai(string $text, array $env): ?array
     }
 
     $baseUrl = rtrim((string)($env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'), '/');
-    $model = trim((string)($env['OPENAI_MODEL'] ?? 'gpt-4.1-mini')) ?: 'gpt-4.1-mini';
+    $model = trim((string)($env['OPENAI_MODEL'] ?? 'gpt-4.1-nano')) ?: 'gpt-4.1-nano';
     $today = date('Y-m-d');
 
     $body = [
