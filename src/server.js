@@ -327,7 +327,9 @@ async function uploadToGoogleCloudStorage(content, objectName, mimeType) {
   if (!bucket) return objectName;
 
   const credentials = await loadGoogleCredentials();
-  if (!credentials) return objectName;
+  if (!credentials) {
+    throw new Error("GOOGLE_CLOUD_BUCKET_NAME esta configurado, mas nao encontrei credenciais em GOOGLE_CLOUD_CREDENTIALS_FILE ou app/config/keys/*.json.");
+  }
 
   const token = await getGoogleAccessToken(credentials);
   const url = new URL(`https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(bucket)}/o`);

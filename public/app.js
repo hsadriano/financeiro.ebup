@@ -133,8 +133,13 @@ elements.fileInput.addEventListener("change", async () => {
 
   const body = new FormData();
   body.append("file", file);
-  await fetch("/api/upload", { method: "POST", body });
+  const response = await fetch("/api/upload", { method: "POST", body });
   elements.fileInput.value = "";
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: "Falha ao enviar arquivo." }));
+    renderLocalError(error.error || error.detail || "Falha ao enviar arquivo.");
+    return;
+  }
   await loadState();
 });
 
@@ -335,6 +340,21 @@ function render(data) {
   renderPendingTransactions(data.pendingTransactions || []);
   renderTransactions(data.transactions);
   updateBadges(data);
+}
+
+function renderLocalError(message) {
+  const currentMessages = [...elements.messages.querySelectorAll(".message")];
+  elements.messages.innerHTML = [
+    ...currentMessages.map((messageElement) => messageElement.outerHTML),
+    `
+      <article class="message assistant">
+        <p>${escapeHtml(message)}</p>
+        <span class="message-time">${formatDateTime(new Date().toISOString())}</span>
+      </article>
+    `
+  ].join("");
+  elements.messages.scrollTop = elements.messages.scrollHeight;
+  activatePanel("chat");
 }
 
 function activatePanel(name) {

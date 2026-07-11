@@ -250,7 +250,7 @@ function upload_to_google_cloud_storage(array $env, string $path, string $object
 
     $credentials = load_google_credentials($env);
     if ($credentials === null) {
-        return $objectName;
+        throw new RuntimeException('GOOGLE_CLOUD_BUCKET_NAME esta configurado, mas nao encontrei credenciais em GOOGLE_CLOUD_CREDENTIALS_FILE ou app/config/keys/*.json.');
     }
 
     $token = google_access_token($credentials);
