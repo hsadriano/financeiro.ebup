@@ -29,6 +29,8 @@ http://SEU_IP_LOCAL:3020
 
 Em hospedagem Node.js, configure `HOST=0.0.0.0`, `PORT` conforme a porta liberada pelo provedor e as variaveis `DB_*` no painel do servidor.
 
+Em hospedagem PHP/Apache, como Hostinger compartilhada, o projeto tambem roda direto em `public_html` usando `api.php` e `.htaccess`. Nesse modo nao precisa iniciar Node: basta configurar o `.env` e garantir que o banco MariaDB exista.
+
 ## O que já existe
 
 - Chat para registrar despesas, receitas e contas a pagar por texto.
@@ -63,6 +65,16 @@ pnpm start
 ```
 
 No servidor, preencha o `.env` real com os dados do MariaDB antes de iniciar.
+
+## Deploy simples em servidor PHP/Apache
+
+```bash
+git clone https://github.com/hsadriano/financeiro.ebup.git public_html
+cd public_html
+cp .env.example .env
+```
+
+Depois preencha o `.env` real. O `.htaccess` serve a interface em `public/` e encaminha `/api/*` para `api.php`.
 
 ## Exemplos de mensagens
 
