@@ -85,4 +85,13 @@ export class JsonStorage {
     await this.write(data);
     return document;
   }
+
+  async updateDocumentName(id, originalName) {
+    const data = await this.read();
+    const document = data.documents.find((item) => item.id === id);
+    if (!document) return null;
+    document.originalName = originalName;
+    await this.write(data);
+    return document;
+  }
 }

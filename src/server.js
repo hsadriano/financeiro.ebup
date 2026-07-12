@@ -192,6 +192,9 @@ const server = createServer(async (request, response) => {
       const parsed = await parseFinancialImage(file.buffer, file.mimeType, file.originalName);
       if (parsed?.intent === "transaction") {
         const saved = await storage.addTransaction({ ...parsed.transaction, status: "pending" });
+        const friendlyName = documentNameFromTransaction(saved.description, document.originalName);
+        await storage.updateDocumentName(document.id, friendlyName);
+        document.originalName = friendlyName;
         await storage.updateDocumentStatus(document.id, "review_pending");
         message += `${summarizeTransaction(saved)} Confira os dados extraidos por OCR antes de confirmar.`;
       } else if (file.mimeType.startsWith("image/") && process.env.OPENAI_API_KEY) {
@@ -671,27 +674,31 @@ function sendImageViewer(response, document) {
   <title>${filename}</title>
   <style>
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100dvh; color: #1b2620; background: #101512; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .viewer { display: grid; grid-template-rows: auto 1fr; min-height: 100dvh; }
-    header { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: calc(10px + env(safe-area-inset-top)) 12px 10px; background: rgba(255,255,255,.96); }
-    strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    button, a { min-height: 38px; padding: 0 12px; border: 1px solid #dbe3de; border-radius: 8px; color: #1b2620; background: #fff; font: inherit; font-weight: 800; text-decoration: none; }
-    main { display: grid; place-items: center; min-height: 0; padding: 12px; }
-    img { max-width: 100%; max-height: calc(100dvh - 82px - env(safe-area-inset-top)); object-fit: contain; border-radius: 8px; background: #fff; }
+    body { margin: 0; min-height: 100dvh; color: #fff; background: #101512; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .viewer { display: grid; min-height: 100dvh; padding: calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom)); place-items: center; }
+    button { position: fixed; top: calc(10px + env(safe-area-inset-top)); right: 10px; z-index: 2; width: 42px; height: 42px; border: 1px solid rgba(255,255,255,.34); border-radius: 999px; color: #fff; background: rgba(16,21,18,.72); font: inherit; font-size: 1.35rem; font-weight: 800; line-height: 1; backdrop-filter: blur(8px); }
+    img { max-width: 100%; max-height: calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); object-fit: contain; border-radius: 8px; background: #fff; }
   </style>
 </head>
 <body>
   <div class="viewer">
-    <header>
-      <strong>${filename}</strong>
-      <button type="button" onclick="window.close(); if (!window.closed) history.back();">Fechar</button>
-    </header>
-    <main>
-      <img src="${imageUrl}" alt="${filename}" />
-    </main>
+    <button type="button" aria-label="Fechar" title="Fechar" onclick="window.close(); if (!window.closed) history.back();">×</button>
+    <img src="${imageUrl}" alt="${filename}" />
   </div>
 </body>
 </html>`);
+}
+
+function documentNameFromTransaction(description, originalName) {
+  const extension = path.extname(originalName || "").replace(/[^a-zA-Z0-9.]/g, "") || ".jpg";
+  const base = String(description || "Comprovante")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9 -]/g, "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 80) || "Comprovante";
+  return `${base}${extension.toLowerCase()}`;
 }
 
 function escapeHtml(value) {

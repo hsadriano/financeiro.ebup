@@ -196,6 +196,9 @@ try {
             $transaction = $parsed['transaction'];
             $transaction['status'] = 'pending';
             $saved = add_transaction($pdo, $userId, $controlId, $transaction);
+            $friendlyName = document_name_from_transaction($saved['description'], $originalName);
+            update_document_name($pdo, $userId, $controlId, $documentId, $friendlyName);
+            $originalName = $friendlyName;
             update_document_status($pdo, $userId, $controlId, $documentId, 'review_pending');
             $message .= summarize_transaction($saved) . ' Confira os dados extraidos por OCR antes de confirmar.';
         } elseif (str_starts_with($mimeType, 'image/') && trim((string)($env['OPENAI_API_KEY'] ?? '')) !== '') {
@@ -1053,24 +1056,16 @@ function serve_image_viewer(string $id, array $document): void
   <title>' . $filename . '</title>
   <style>
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100dvh; color: #1b2620; background: #101512; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .viewer { display: grid; grid-template-rows: auto 1fr; min-height: 100dvh; }
-    header { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: calc(10px + env(safe-area-inset-top)) 12px 10px; background: rgba(255,255,255,.96); }
-    strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    button { min-height: 38px; padding: 0 12px; border: 1px solid #dbe3de; border-radius: 8px; color: #1b2620; background: #fff; font: inherit; font-weight: 800; }
-    main { display: grid; place-items: center; min-height: 0; padding: 12px; }
-    img { max-width: 100%; max-height: calc(100dvh - 82px - env(safe-area-inset-top)); object-fit: contain; border-radius: 8px; background: #fff; }
+    body { margin: 0; min-height: 100dvh; color: #fff; background: #101512; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .viewer { display: grid; min-height: 100dvh; padding: calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom)); place-items: center; }
+    button { position: fixed; top: calc(10px + env(safe-area-inset-top)); right: 10px; z-index: 2; width: 42px; height: 42px; border: 1px solid rgba(255,255,255,.34); border-radius: 999px; color: #fff; background: rgba(16,21,18,.72); font: inherit; font-size: 1.35rem; font-weight: 800; line-height: 1; backdrop-filter: blur(8px); }
+    img { max-width: 100%; max-height: calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); object-fit: contain; border-radius: 8px; background: #fff; }
   </style>
 </head>
 <body>
   <div class="viewer">
-    <header>
-      <strong>' . $filename . '</strong>
-      <button type="button" onclick="window.close(); if (!window.closed) history.back();">Fechar</button>
-    </header>
-    <main>
-      <img src="' . htmlspecialchars($imageUrl, ENT_QUOTES, 'UTF-8') . '" alt="' . $filename . '" />
-    </main>
+    <button type="button" aria-label="Fechar" title="Fechar" onclick="window.close(); if (!window.closed) history.back();">×</button>
+    <img src="' . htmlspecialchars($imageUrl, ENT_QUOTES, 'UTF-8') . '" alt="' . $filename . '" />
   </div>
 </body>
 </html>';
@@ -1129,6 +1124,24 @@ function update_document_status(PDO $pdo, int $userId, int $controlId, int $docu
 {
     $stmt = $pdo->prepare('UPDATE documents SET status = ? WHERE id = ? AND user_id = ? AND control_id = ?');
     $stmt->execute([$status, $documentId, $userId, $controlId]);
+}
+
+function update_document_name(PDO $pdo, int $userId, int $controlId, int $documentId, string $originalName): void
+{
+    $stmt = $pdo->prepare('UPDATE documents SET original_name = ? WHERE id = ? AND user_id = ? AND control_id = ?');
+    $stmt->execute([$originalName, $documentId, $userId, $controlId]);
+}
+
+function document_name_from_transaction(string $description, string $originalName): string
+{
+    $extension = pathinfo($originalName, PATHINFO_EXTENSION);
+    $safeExtension = $extension !== '' ? strtolower(preg_replace('/[^a-zA-Z0-9]/', '', $extension)) : 'jpg';
+    $base = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $description);
+    $base = $base === false ? $description : $base;
+    $base = preg_replace('/[^a-zA-Z0-9 -]/', '', $base) ?: 'Comprovante';
+    $base = trim(preg_replace('/\s+/', ' ', $base));
+    $base = mb_substr($base !== '' ? $base : 'Comprovante', 0, 80);
+    return "{$base}.{$safeExtension}";
 }
 
 function update_transaction_status(PDO $pdo, int $userId, int $controlId, string $id, string $status): ?array

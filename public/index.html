@@ -11,7 +11,7 @@
     <link rel="icon" type="image/png" href="/finup-favicon.png" />
     <link rel="apple-touch-icon" href="/finup-logo.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/styles.css?v=20260712-3" />
+    <link rel="stylesheet" href="/styles.css?v=20260712-4" />
   </head>
   <body>
     <section id="auth-screen" class="auth-screen">
@@ -81,19 +81,19 @@
           </header>
 
           <div class="metric-grid">
-            <article class="metric">
+            <article class="metric metric-link" data-dashboard-filter="income" tabindex="0" role="button" aria-label="Ver receitas do mês">
               <span>Receitas</span>
               <strong id="income">R$ 0,00</strong>
             </article>
-            <article class="metric">
+            <article class="metric metric-link" data-dashboard-filter="expense" tabindex="0" role="button" aria-label="Ver despesas do mês">
               <span>Despesas</span>
               <strong id="expenses">R$ 0,00</strong>
             </article>
-            <article class="metric result">
+            <article class="metric result metric-link" data-dashboard-filter="result" tabindex="0" role="button" aria-label="Ver resultado do mês">
               <span>Resultado</span>
               <strong id="result">R$ 0,00</strong>
             </article>
-            <article class="metric">
+            <article class="metric metric-link" data-dashboard-filter="payable" tabindex="0" role="button" aria-label="Ver contas a pagar">
               <span>A pagar</span>
               <strong id="payable">R$ 0,00</strong>
             </article>
@@ -149,7 +149,34 @@
           <div id="pending-transactions" class="transaction-list pending-list"></div>
 
           <div class="panel-title">
-            <h2>Lançamentos</h2>
+            <div>
+              <h2 id="ledger-title">Lançamentos</h2>
+              <p id="ledger-filter-summary" class="filter-summary">Todos os lançamentos confirmados.</p>
+            </div>
+            <button id="clear-ledger-filters" class="filter-clear-button" type="button">Limpar</button>
+          </div>
+          <div class="ledger-filters" aria-label="Filtros de lançamentos">
+            <label>
+              <span>Tipo</span>
+              <select id="ledger-kind-filter">
+                <option value="all">Todos</option>
+                <option value="income">Receitas</option>
+                <option value="expense">Despesas</option>
+                <option value="payable">A pagar</option>
+              </select>
+            </label>
+            <label>
+              <span>Período</span>
+              <select id="ledger-period-filter">
+                <option value="current-month">Mês atual</option>
+                <option value="upcoming">Próximos vencimentos</option>
+                <option value="all">Todo histórico</option>
+              </select>
+            </label>
+            <label>
+              <span>Categoria</span>
+              <input id="ledger-category-filter" list="category-options" placeholder="Todas" />
+            </label>
           </div>
           <div id="transactions" class="transaction-list"></div>
         </aside>
@@ -193,6 +220,6 @@
       <option value="Outros"></option>
     </datalist>
 
-    <script src="/app.js?v=20260712-3" type="module"></script>
+    <script src="/app.js?v=20260712-4" type="module"></script>
   </body>
 </html>

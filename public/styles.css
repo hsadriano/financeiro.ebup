@@ -260,6 +260,17 @@ select {
   background: var(--surface-2);
 }
 
+.metric-link {
+  cursor: pointer;
+}
+
+.metric-link:hover,
+.metric-link:focus-visible {
+  border-color: rgba(49, 95, 159, 0.45);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(49, 95, 159, 0.12);
+}
+
 .metric strong {
   display: block;
   margin-top: 8px;
@@ -625,6 +636,14 @@ h2 {
   grid-template-columns: 1fr auto;
   gap: 8px;
   align-items: center;
+  cursor: pointer;
+}
+
+.category-row:hover,
+.category-row:focus-visible {
+  border-color: rgba(49, 95, 159, 0.38);
+  outline: none;
+  background: #f7fbff;
 }
 
 .bar {
@@ -780,6 +799,53 @@ h2 {
   grid-template-columns: 1fr 1fr 1fr;
   gap: 8px;
   margin-top: 10px;
+}
+
+.filter-summary {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.filter-clear-button {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--blue);
+  background: #fff;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.ledger-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.ledger-filters label {
+  display: grid;
+  gap: 4px;
+}
+
+.ledger-filters span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.ledger-filters select,
+.ledger-filters input {
+  min-width: 0;
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 9px;
+  color: var(--ink);
+  background: #fff;
 }
 
 .review-actions button {
@@ -980,7 +1046,8 @@ h2 {
 
   .review-actions,
   .review-grid,
-  .optional-grid {
+  .optional-grid,
+  .ledger-filters {
     grid-template-columns: 1fr;
   }
 

@@ -2,6 +2,12 @@ const state = {
   currency: new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }),
   activePanel: "summary",
   categoryKind: "expense",
+  ledgerFilters: {
+    kind: "all",
+    period: "current-month",
+    category: ""
+  },
+  allTransactions: [],
   session: null,
   authMode: new URLSearchParams(window.location.search).has("reset") ? "reset" : "login",
   resetToken: new URLSearchParams(window.location.search).get("reset")
@@ -32,6 +38,7 @@ const elements = {
   expenses: document.querySelector("#expenses"),
   result: document.querySelector("#result"),
   payable: document.querySelector("#payable"),
+  dashboardFilters: document.querySelectorAll("[data-dashboard-filter]"),
   categories: document.querySelector("#categories"),
   insights: document.querySelector("#insights"),
   categoryKindButtons: document.querySelectorAll("[data-category-kind]"),
@@ -39,6 +46,12 @@ const elements = {
   messages: document.querySelector("#messages"),
   pendingTransactions: document.querySelector("#pending-transactions"),
   transactions: document.querySelector("#transactions"),
+  ledgerTitle: document.querySelector("#ledger-title"),
+  ledgerFilterSummary: document.querySelector("#ledger-filter-summary"),
+  ledgerKindFilter: document.querySelector("#ledger-kind-filter"),
+  ledgerPeriodFilter: document.querySelector("#ledger-period-filter"),
+  ledgerCategoryFilter: document.querySelector("#ledger-category-filter"),
+  clearLedgerFilters: document.querySelector("#clear-ledger-filters"),
   form: document.querySelector("#chat-form"),
   input: document.querySelector("#message-input"),
   fileInput: document.querySelector("#file-input"),
@@ -52,12 +65,39 @@ elements.tabs.forEach((tab) => {
   tab.addEventListener("click", () => activatePanel(tab.dataset.tab));
 });
 
+elements.dashboardFilters.forEach((card) => {
+  const open = () => applyDashboardFilter(card.dataset.dashboardFilter);
+  card.addEventListener("click", open);
+  card.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      open();
+    }
+  });
+});
+
 elements.categoryKindButtons.forEach((button) => {
   button.addEventListener("click", () => {
     state.categoryKind = button.dataset.categoryKind;
     elements.categoryKindButtons.forEach((item) => item.classList.toggle("active", item === button));
     renderCategories(state.lastSummary || { expenseCategories: [], incomeCategories: [], categories: [] });
   });
+});
+
+[elements.ledgerKindFilter, elements.ledgerPeriodFilter, elements.ledgerCategoryFilter].forEach((element) => {
+  element.addEventListener("input", () => {
+    state.ledgerFilters = {
+      kind: elements.ledgerKindFilter.value,
+      period: elements.ledgerPeriodFilter.value,
+      category: elements.ledgerCategoryFilter.value.trim()
+    };
+    renderTransactions(state.allTransactions);
+  });
+});
+
+elements.clearLedgerFilters.addEventListener("click", () => {
+  setLedgerFilters({ kind: "all", period: "current-month", category: "" });
+  renderTransactions(state.allTransactions);
 });
 
 elements.authForm.addEventListener("submit", async (event) => {
@@ -341,6 +381,7 @@ function showAuthHelp(message) {
 
 function render(data) {
   state.lastSummary = data.summary;
+  state.allTransactions = data.transactions || [];
   elements.income.textContent = money(data.summary.income);
   elements.expenses.textContent = money(data.summary.expenses);
   elements.result.textContent = money(data.summary.result);
@@ -351,7 +392,7 @@ function render(data) {
   renderInsights(data.summary);
   renderDocuments(data.documents);
   renderPendingTransactions(data.pendingTransactions || []);
-  renderTransactions(data.transactions);
+  renderTransactions(state.allTransactions);
   updateBadges(data);
 }
 
@@ -499,7 +540,7 @@ function renderCategories(summary) {
     .map((category) => {
       const width = Math.max(6, Math.round((category.amount / max) * 100));
       return `
-        <article class="category-row ${escapeHtml(state.categoryKind)}">
+        <article class="category-row ${escapeHtml(state.categoryKind)}" data-category-filter="${escapeAttribute(category.name)}" tabindex="0" role="button" aria-label="Ver lançamentos de ${escapeAttribute(category.name)}">
           <strong>${escapeHtml(category.name)}</strong>
           <span>${money(category.amount)}</span>
           <div class="bar"><span style="width:${width}%"></span></div>
@@ -507,6 +548,47 @@ function renderCategories(summary) {
       `;
     })
     .join("");
+
+  elements.categories.querySelectorAll("[data-category-filter]").forEach((row) => {
+    const open = () => applyCategoryFilter(row.dataset.categoryFilter);
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
+    });
+  });
+}
+
+function applyDashboardFilter(filter) {
+  const nextFilters = {
+    income: { kind: "income", period: "current-month", category: "" },
+    expense: { kind: "expense", period: "current-month", category: "" },
+    result: { kind: "all", period: "current-month", category: "" },
+    payable: { kind: "payable", period: "upcoming", category: "" }
+  }[filter] || { kind: "all", period: "current-month", category: "" };
+
+  setLedgerFilters(nextFilters);
+  renderTransactions(state.allTransactions);
+  activatePanel("review");
+}
+
+function applyCategoryFilter(category) {
+  setLedgerFilters({
+    kind: state.categoryKind,
+    period: "current-month",
+    category
+  });
+  renderTransactions(state.allTransactions);
+  activatePanel("review");
+}
+
+function setLedgerFilters(filters) {
+  state.ledgerFilters = { ...state.ledgerFilters, ...filters };
+  elements.ledgerKindFilter.value = state.ledgerFilters.kind;
+  elements.ledgerPeriodFilter.value = state.ledgerFilters.period;
+  elements.ledgerCategoryFilter.value = state.ledgerFilters.category;
 }
 
 function renderInsights(summary) {
@@ -605,12 +687,16 @@ function renderDocuments(documents) {
 }
 
 function renderTransactions(transactions) {
-  if (!transactions.length) {
-    elements.transactions.innerHTML = `<p class="empty">Os lancamentos aparecem aqui quando voce conversar comigo.</p>`;
+  syncLedgerFilterControls();
+  const filteredTransactions = filterTransactions(transactions);
+  renderLedgerFilterSummary(filteredTransactions.length);
+
+  if (!filteredTransactions.length) {
+    elements.transactions.innerHTML = `<p class="empty">Nenhum lançamento encontrado para este filtro.</p>`;
     return;
   }
 
-  elements.transactions.innerHTML = transactions
+  elements.transactions.innerHTML = filteredTransactions
     .map(
       (transaction) => `
         <article class="transaction-row confirmed-row" data-id="${escapeHtml(transaction.id)}">
@@ -641,6 +727,59 @@ function renderTransactions(transactions) {
       await loadState();
     });
   });
+}
+
+function filterTransactions(transactions) {
+  const { kind, period, category } = state.ledgerFilters;
+  const today = new Date().toISOString().slice(0, 10);
+  const currentMonth = today.slice(0, 7);
+  const normalizedCategory = normalizeText(category);
+
+  return transactions.filter((transaction) => {
+    const date = transaction.dueDate || transaction.transactionDate;
+    if (kind === "payable") {
+      if (transaction.status !== "scheduled") return false;
+    } else if (kind !== "all" && transaction.kind !== kind) {
+      return false;
+    }
+
+    if (period === "current-month" && !String(transaction.transactionDate).startsWith(currentMonth)) return false;
+    if (period === "upcoming" && String(date) < today) return false;
+    if (normalizedCategory && normalizeText(transaction.category) !== normalizedCategory) return false;
+    return true;
+  });
+}
+
+function renderLedgerFilterSummary(count) {
+  const { kind, period, category } = state.ledgerFilters;
+  const kindLabel = {
+    all: "Todos os lançamentos",
+    income: "Receitas",
+    expense: "Despesas",
+    payable: "Contas a pagar"
+  }[kind] || "Lançamentos";
+  const periodLabel = {
+    "current-month": "do mês atual",
+    upcoming: "com vencimento futuro",
+    all: "de todo o histórico"
+  }[period] || "";
+  const categoryLabel = category ? ` em ${category}` : "";
+
+  elements.ledgerTitle.textContent = kindLabel;
+  elements.ledgerFilterSummary.textContent = `${count} item(ns) ${periodLabel}${categoryLabel}.`;
+}
+
+function syncLedgerFilterControls() {
+  if (elements.ledgerKindFilter.value !== state.ledgerFilters.kind) elements.ledgerKindFilter.value = state.ledgerFilters.kind;
+  if (elements.ledgerPeriodFilter.value !== state.ledgerFilters.period) elements.ledgerPeriodFilter.value = state.ledgerFilters.period;
+  if (elements.ledgerCategoryFilter.value !== state.ledgerFilters.category) elements.ledgerCategoryFilter.value = state.ledgerFilters.category;
+}
+
+function normalizeText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
 }
 
 function renderPendingTransactions(transactions) {
