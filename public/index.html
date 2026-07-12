@@ -11,7 +11,7 @@
     <link rel="icon" type="image/png" href="/finup-favicon.png" />
     <link rel="apple-touch-icon" href="/finup-logo.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/styles.css?v=20260711-3" />
+    <link rel="stylesheet" href="/styles.css?v=20260712-3" />
   </head>
   <body>
     <section id="auth-screen" class="auth-screen">
@@ -102,8 +102,19 @@
           <div class="panel">
             <div class="panel-title">
               <h2>Categorias</h2>
+              <div class="segmented-control" role="tablist" aria-label="Tipo de categoria">
+                <button type="button" class="active" data-category-kind="expense">Despesas</button>
+                <button type="button" data-category-kind="income">Receitas</button>
+              </div>
             </div>
             <div id="categories" class="category-list"></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">
+              <h2>Gráficos</h2>
+            </div>
+            <div id="insights" class="insight-grid"></div>
           </div>
         </aside>
 
@@ -152,10 +163,20 @@
       </section>
 
       <nav class="tabbar" aria-label="Navegação principal">
-        <button type="button" class="active" data-tab="summary">Painel</button>
-        <button type="button" data-tab="chat">Chat</button>
-        <button type="button" data-tab="review">Revisar <span id="pending-badge" class="badge" hidden>0</span></button>
-        <button type="button" data-tab="files">Arquivos <span id="files-badge" class="badge" hidden>0</span></button>
+        <button type="button" class="active" data-tab="summary" aria-label="Painel" title="Painel">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z" /></svg>
+        </button>
+        <button type="button" data-tab="chat" aria-label="Chat" title="Chat">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5C4 4.1 5.1 3 6.5 3h11C18.9 3 20 4.1 20 5.5v8c0 1.4-1.1 2.5-2.5 2.5H9l-4.1 3.1c-.4.3-.9 0-.9-.5V5.5Z" /></svg>
+        </button>
+        <button type="button" data-tab="review" aria-label="Revisar" title="Revisar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10c1.1 0 2 .9 2 2v14c0 1.1-.9 2-2 2H7c-1.1 0-2-.9-2-2V5c0-1.1.9-2 2-2Zm1 5h8V6H8v2Zm0 5h8v-2H8v2Zm0 5h5v-2H8v2Z" /></svg>
+          <span id="pending-badge" class="badge" hidden>0</span>
+        </button>
+        <button type="button" data-tab="files" aria-label="Arquivos" title="Arquivos">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4c0-1.1.9-2 2-2h6l6 6v12c0 1.1-.9 2-2 2H7c-1.1 0-2-.9-2-2V4Zm8 1v4h4l-4-4ZM8 13h8v-2H8v2Zm0 4h8v-2H8v2Z" /></svg>
+          <span id="files-badge" class="badge" hidden>0</span>
+        </button>
       </nav>
       <input id="file-input" class="file-input" type="file" accept="image/*,.pdf,.txt,.csv" />
     </main>
@@ -172,6 +193,6 @@
       <option value="Outros"></option>
     </datalist>
 
-    <script src="/app.js?v=20260711-3" type="module"></script>
+    <script src="/app.js?v=20260712-3" type="module"></script>
   </body>
 </html>

@@ -385,6 +385,51 @@ h2 {
   color: rgba(255, 255, 255, 0.78);
 }
 
+.chat-pending-card {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.chat-pending-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid rgba(38, 80, 58, 0.16);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.chat-pending-row strong,
+.chat-pending-row span {
+  display: block;
+}
+
+.chat-pending-row span,
+.chat-pending-extra {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.chat-pending-actions,
+.chat-bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.chat-pending-actions button,
+.chat-bulk-actions button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 0.8rem;
+}
+
 .composer {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -452,7 +497,7 @@ h2 {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 6px;
-  padding: 8px;
+  padding: 6px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.94);
@@ -461,7 +506,9 @@ h2 {
 
 .tabbar button {
   position: relative;
-  min-height: 42px;
+  display: grid;
+  min-height: 38px;
+  place-items: center;
   border: 0;
   border-radius: 8px;
   color: var(--muted);
@@ -473,6 +520,12 @@ h2 {
 .tabbar button.active {
   color: #fff;
   background: var(--blue);
+}
+
+.tabbar svg {
+  width: 21px;
+  height: 21px;
+  fill: currentColor;
 }
 
 .badge {
@@ -497,9 +550,74 @@ h2 {
   background: #fbfcfb;
 }
 
+.confirmed-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.confirmed-row .transaction-meta:last-child {
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+}
+
+.danger-button {
+  border-color: rgba(176, 54, 54, 0.32);
+  color: #9f2f2f;
+  background: #fff7f5;
+}
+
+.document-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.open-file-button {
+  display: inline-grid;
+  min-height: 34px;
+  padding: 0 12px;
+  place-items: center;
+  border: 1px solid rgba(38, 80, 58, 0.28);
+  border-radius: 8px;
+  color: var(--green-900);
+  background: #f4faf6;
+  font-size: 0.86rem;
+  font-weight: 800;
+  text-decoration: none;
+}
+
 .pending-row {
   border-color: rgba(166, 109, 18, 0.42);
   background: #fffaf1;
+}
+
+.segmented-control {
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.segmented-control button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.segmented-control button.active {
+  color: #fff;
+  background: var(--green);
 }
 
 .category-row {
@@ -521,6 +639,121 @@ h2 {
   display: block;
   height: 100%;
   background: var(--amber);
+}
+
+.category-row.income .bar span {
+  background: var(--green);
+}
+
+.category-row.expense .bar span {
+  background: var(--red);
+}
+
+.insight-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.insight-card {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfb;
+}
+
+.insight-title {
+  display: flex;
+  gap: 6px;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.insight-title span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.monthly-chart {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(28px, 1fr));
+  gap: 8px;
+  min-height: 146px;
+  align-items: end;
+}
+
+.month-bars {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.bars {
+  display: flex;
+  gap: 3px;
+  height: 112px;
+  align-items: end;
+  justify-content: center;
+  padding: 7px 4px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.bars span {
+  width: 9px;
+  min-height: 4px;
+  border-radius: 999px 999px 2px 2px;
+}
+
+.income-bar {
+  background: var(--green);
+}
+
+.expense-bar {
+  background: var(--red);
+}
+
+.month-bars small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comparison-list {
+  display: grid;
+  gap: 8px;
+}
+
+.comparison-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line);
+}
+
+.comparison-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.comparison-row .income,
+.big-number.income {
+  color: var(--green);
+}
+
+.comparison-row .expense,
+.big-number.expense {
+  color: var(--red);
+}
+
+.big-number {
+  font-size: 1.55rem;
 }
 
 .transaction-row strong,
@@ -702,12 +935,12 @@ h2 {
   .sidebar,
   .ledger,
   .files-panel {
-    min-height: calc(100dvh - 196px);
-    max-height: calc(100dvh - 196px);
+    min-height: calc(100dvh - 208px);
+    max-height: calc(100dvh - 208px);
   }
 
   .messages {
-    max-height: calc(100dvh - 366px);
+    max-height: calc(100dvh - 378px);
   }
 
   .topbar {
@@ -728,6 +961,15 @@ h2 {
     max-width: 94%;
   }
 
+  .chat-pending-row {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-pending-actions,
+  .chat-bulk-actions {
+    justify-content: flex-start;
+  }
+
   .composer {
     grid-template-columns: 1fr;
   }
@@ -742,6 +984,19 @@ h2 {
     grid-template-columns: 1fr;
   }
 
+  .confirmed-row {
+    grid-template-columns: 1fr;
+  }
+
+  .confirmed-row .transaction-meta:last-child {
+    justify-items: start;
+  }
+
+  .document-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
   .metric-grid {
     grid-template-columns: 1fr 1fr;
   }
@@ -750,6 +1005,6 @@ h2 {
   .transaction-list,
   .pending-list,
   .category-list {
-    max-height: calc(100dvh - 236px);
+    max-height: calc(100dvh - 248px);
   }
 }

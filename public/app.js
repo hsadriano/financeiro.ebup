@@ -1,6 +1,7 @@
 const state = {
   currency: new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }),
   activePanel: "summary",
+  categoryKind: "expense",
   session: null,
   authMode: new URLSearchParams(window.location.search).has("reset") ? "reset" : "login",
   resetToken: new URLSearchParams(window.location.search).get("reset")
@@ -32,6 +33,8 @@ const elements = {
   result: document.querySelector("#result"),
   payable: document.querySelector("#payable"),
   categories: document.querySelector("#categories"),
+  insights: document.querySelector("#insights"),
+  categoryKindButtons: document.querySelectorAll("[data-category-kind]"),
   documents: document.querySelector("#documents"),
   messages: document.querySelector("#messages"),
   pendingTransactions: document.querySelector("#pending-transactions"),
@@ -47,6 +50,14 @@ const elements = {
 
 elements.tabs.forEach((tab) => {
   tab.addEventListener("click", () => activatePanel(tab.dataset.tab));
+});
+
+elements.categoryKindButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    state.categoryKind = button.dataset.categoryKind;
+    elements.categoryKindButtons.forEach((item) => item.classList.toggle("active", item === button));
+    renderCategories(state.lastSummary || { expenseCategories: [], incomeCategories: [], categories: [] });
+  });
 });
 
 elements.authForm.addEventListener("submit", async (event) => {
@@ -329,13 +340,15 @@ function showAuthHelp(message) {
 }
 
 function render(data) {
+  state.lastSummary = data.summary;
   elements.income.textContent = money(data.summary.income);
   elements.expenses.textContent = money(data.summary.expenses);
   elements.result.textContent = money(data.summary.result);
   elements.payable.textContent = money(data.summary.payableTotal);
 
-  renderMessages(data.messages);
-  renderCategories(data.summary.categories);
+  renderMessages(data.messages, data.pendingTransactions || []);
+  renderCategories(data.summary);
+  renderInsights(data.summary);
   renderDocuments(data.documents);
   renderPendingTransactions(data.pendingTransactions || []);
   renderTransactions(data.transactions);
@@ -378,23 +391,106 @@ function setBadge(element, count) {
   element.hidden = count === 0;
 }
 
-function renderMessages(messages) {
+function renderMessages(messages, pendingTransactions = []) {
+  const actionableMessageIndex = findActionableMessageIndex(messages, pendingTransactions);
   elements.messages.innerHTML = messages
-    .map(
-      (message) => `
+    .map((message, index) => {
+      const actions = index === actionableMessageIndex ? renderChatPendingActions(pendingTransactions) : "";
+      return `
         <article class="message ${escapeHtml(message.role)}">
           <p>${escapeHtml(message.content)}</p>
+          ${actions}
           <span class="message-time">${formatDateTime(message.createdAt)}</span>
         </article>
-      `
-    )
+      `;
+    })
     .join("");
+
+  elements.messages.querySelectorAll("[data-chat-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = button.dataset.chatAction;
+      button.disabled = true;
+
+      if (action === "review") {
+        activatePanel("review");
+        return;
+      }
+
+      const targetIds = action === "confirm-all" || action === "dismiss-all"
+        ? pendingTransactions.map((transaction) => transaction.id)
+        : [button.dataset.id];
+      const endpointAction = action.startsWith("confirm") ? "confirm" : "dismiss";
+
+      for (const id of targetIds) {
+        await fetch(`/api/transactions/${encodeURIComponent(id)}/${endpointAction}`, { method: "POST" });
+      }
+      await loadState();
+    });
+  });
   elements.messages.scrollTop = elements.messages.scrollHeight;
 }
 
-function renderCategories(categories) {
+function findActionableMessageIndex(messages, pendingTransactions) {
+  if (!pendingTransactions.length) return -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === "assistant" && /confira os dados/i.test(message.content)) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function renderChatPendingActions(pendingTransactions) {
+  if (!pendingTransactions.length) return "";
+
+  const rows = pendingTransactions.slice(0, 5).map((transaction) => {
+    const date = transaction.dueDate || transaction.transactionDate;
+    return `
+      <div class="chat-pending-row">
+        <div>
+          <strong>${escapeHtml(transaction.description)}</strong>
+          <span>${money(transaction.amount)} · ${escapeHtml(transaction.category)} · ${formatDate(date)}</span>
+        </div>
+        <div class="chat-pending-actions">
+          <button type="button" data-chat-action="confirm" data-id="${escapeHtml(transaction.id)}">Confirmar</button>
+          <button type="button" data-chat-action="dismiss" data-id="${escapeHtml(transaction.id)}">Descartar</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  const extra = pendingTransactions.length > 5
+    ? `<p class="chat-pending-extra">Mais ${pendingTransactions.length - 5} pendência(s) na aba Revisar.</p>`
+    : "";
+  const bulkActions = pendingTransactions.length > 1
+    ? `
+      <button type="button" data-chat-action="confirm-all">Confirmar todos</button>
+      <button type="button" data-chat-action="dismiss-all">Descartar todos</button>
+    `
+    : "";
+
+  return `
+    <div class="chat-pending-card">
+      ${rows}
+      ${extra}
+      <div class="chat-bulk-actions">
+        ${bulkActions}
+        <button type="button" data-chat-action="review">Revisar/editar</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderCategories(summary) {
+  const categories =
+    state.categoryKind === "income"
+      ? summary.incomeCategories || []
+      : summary.expenseCategories || summary.categories || [];
+  const label = state.categoryKind === "income" ? "receitas" : "despesas";
+
   if (!categories.length) {
-    elements.categories.innerHTML = `<p class="empty">Sem despesas categorizadas neste mes.</p>`;
+    elements.categories.innerHTML = `<p class="empty">Sem ${label} categorizadas neste mes.</p>`;
     return;
   }
 
@@ -403,7 +499,7 @@ function renderCategories(categories) {
     .map((category) => {
       const width = Math.max(6, Math.round((category.amount / max) * 100));
       return `
-        <article class="category-row">
+        <article class="category-row ${escapeHtml(state.categoryKind)}">
           <strong>${escapeHtml(category.name)}</strong>
           <span>${money(category.amount)}</span>
           <div class="bar"><span style="width:${width}%"></span></div>
@@ -413,6 +509,80 @@ function renderCategories(categories) {
     .join("");
 }
 
+function renderInsights(summary) {
+  const series = summary.monthlySeries || [];
+  if (!series.length) {
+    elements.insights.innerHTML = `<p class="empty">Os graficos aparecem quando houver lancamentos confirmados.</p>`;
+    return;
+  }
+
+  const current = series.at(-1) || {};
+  const previous = series.at(-2) || {};
+  const incomeDelta = Number(current.income || 0) - Number(previous.income || 0);
+  const expenseDelta = Number(current.expenses || 0) - Number(previous.expenses || 0);
+  const resultDelta = Number(current.result || 0) - Number(previous.result || 0);
+
+  elements.insights.innerHTML = `
+    <article class="insight-card">
+      <div class="insight-title">
+        <strong>Evolução mensal</strong>
+        <span>Últimos ${series.length} meses</span>
+      </div>
+      ${renderMonthlyChart(series)}
+    </article>
+    <article class="insight-card">
+      <div class="insight-title">
+        <strong>Comparação mensal</strong>
+        <span>${escapeHtml(previous.label || "Mês anterior")} → ${escapeHtml(current.label || "Atual")}</span>
+      </div>
+      <div class="comparison-list">
+        ${renderComparisonRow("Receitas", incomeDelta, "income")}
+        ${renderComparisonRow("Despesas", expenseDelta, "expense")}
+        ${renderComparisonRow("Resultado", resultDelta, resultDelta >= 0 ? "income" : "expense")}
+      </div>
+    </article>
+    <article class="insight-card">
+      <div class="insight-title">
+        <strong>Resultado acumulado</strong>
+        <span>Receitas menos despesas</span>
+      </div>
+      <strong class="big-number ${Number(summary.result || 0) >= 0 ? "income" : "expense"}">${money(summary.result)}</strong>
+      <span class="transaction-meta">Neste mês</span>
+    </article>
+  `;
+}
+
+function renderMonthlyChart(series) {
+  const max = Math.max(1, ...series.flatMap((item) => [Number(item.income || 0), Number(item.expenses || 0)]));
+  return `
+    <div class="monthly-chart" role="img" aria-label="Comparativo mensal de receitas e despesas">
+      ${series.map((item) => {
+        const incomeHeight = Math.max(4, Math.round((Number(item.income || 0) / max) * 92));
+        const expenseHeight = Math.max(4, Math.round((Number(item.expenses || 0) / max) * 92));
+        return `
+          <div class="month-bars">
+            <div class="bars">
+              <span class="income-bar" style="height:${incomeHeight}%"></span>
+              <span class="expense-bar" style="height:${expenseHeight}%"></span>
+            </div>
+            <small>${escapeHtml(item.shortLabel || item.label)}</small>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderComparisonRow(label, delta, kind) {
+  const sign = delta > 0 ? "+" : "";
+  return `
+    <div class="comparison-row">
+      <span>${escapeHtml(label)}</span>
+      <strong class="${escapeHtml(kind)}">${sign}${money(delta)}</strong>
+    </div>
+  `;
+}
+
 function renderDocuments(documents) {
   if (!documents.length) {
     elements.documents.innerHTML = `<p class="empty">Nenhum arquivo enviado ainda.</p>`;
@@ -420,12 +590,14 @@ function renderDocuments(documents) {
   }
 
   elements.documents.innerHTML = documents
-    .slice(0, 6)
     .map(
       (document) => `
         <article class="document-row">
-          <strong>${escapeHtml(document.originalName)}</strong>
-          <span class="transaction-meta">${escapeHtml(document.status)} · ${formatDateTime(document.createdAt)}</span>
+          <div>
+            <strong>${escapeHtml(document.originalName)}</strong>
+            <span class="transaction-meta">${escapeHtml(document.status)} · ${formatDateTime(document.createdAt)}</span>
+          </div>
+          <a class="open-file-button" href="/api/documents/${encodeURIComponent(document.id)}/view" target="_blank" rel="noopener">Abrir</a>
         </article>
       `
     )
@@ -441,17 +613,34 @@ function renderTransactions(transactions) {
   elements.transactions.innerHTML = transactions
     .map(
       (transaction) => `
-        <article class="transaction-row">
-          <strong>${escapeHtml(transaction.description)}</strong>
-          <span class="transaction-value ${escapeHtml(transaction.kind)}">${money(transaction.amount)}</span>
+        <article class="transaction-row confirmed-row" data-id="${escapeHtml(transaction.id)}">
+          <div>
+            <strong>${escapeHtml(transaction.description)}</strong>
+            <div class="transaction-meta">
+              ${escapeHtml(transaction.category)} · ${formatDate(transaction.transactionDate)}
+              ${transaction.dueDate ? ` · vence ${formatDate(transaction.dueDate)}` : ""}
+            </div>
+          </div>
           <div class="transaction-meta">
-            ${escapeHtml(transaction.category)} · ${formatDate(transaction.transactionDate)}
-            ${transaction.dueDate ? ` · vence ${formatDate(transaction.dueDate)}` : ""}
+            <span class="transaction-value ${escapeHtml(transaction.kind)}">${money(transaction.amount)}</span>
+            <button type="button" class="danger-button" data-action="remove" data-id="${escapeHtml(transaction.id)}">Remover</button>
           </div>
         </article>
       `
     )
     .join("");
+
+  elements.transactions.querySelectorAll("button[data-action='remove']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.id;
+      const card = button.closest(".transaction-row");
+      const description = card.querySelector("strong")?.textContent || "este lançamento";
+      if (!confirm(`Remover ${description}?`)) return;
+      button.disabled = true;
+      await fetch(`/api/transactions/${encodeURIComponent(id)}/remove`, { method: "POST" });
+      await loadState();
+    });
+  });
 }
 
 function renderPendingTransactions(transactions) {

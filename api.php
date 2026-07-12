@@ -98,6 +98,10 @@ try {
         respond(session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId]));
     }
 
+    if ($method === 'GET' && preg_match('#^documents/([^/]+)/view$#', $path, $matches)) {
+        serve_document($pdo, $userId, $controlId, $matches[1], $env);
+    }
+
     if ($method === 'POST' && $path === 'chat') {
         $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
         $message = trim((string)($body['message'] ?? ''));
@@ -109,19 +113,24 @@ try {
         $parsed = parse_financial_message($message, $env);
 
         if ($parsed['intent'] === 'transaction') {
-            $transaction = $parsed['transaction'];
-            $transaction['status'] = 'pending';
-            $saved = add_transaction($pdo, $userId, $controlId, $transaction);
-            $assistant = summarize_transaction($saved) . ' Confira os dados e confirme para salvar nos relatorios.';
+            $transactions = $parsed['transactions'] ?? [$parsed['transaction']];
+            $saved = [];
+            foreach ($transactions as $transaction) {
+                $transaction['status'] = 'pending';
+                $saved[] = add_transaction($pdo, $userId, $controlId, $transaction);
+            }
+            $assistant = count($saved) > 1
+                ? summarize_transactions($saved) . ' Confira os dados e confirme para salvar nos relatorios.'
+                : summarize_transaction($saved[0]) . ' Confira os dados e confirme para salvar nos relatorios.';
         } else {
-            $assistant = $parsed['answer'];
+            $assistant = answer_analytical_question($message, read_data($pdo, $userId, $controlId)) ?: $parsed['answer'];
         }
 
         add_message($pdo, $userId, $controlId, 'assistant', $assistant);
         respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
     }
 
-    if ($method === 'POST' && preg_match('#^transactions/([^/]+)/(confirm|dismiss|update)$#', $path, $matches)) {
+    if ($method === 'POST' && preg_match('#^transactions/([^/]+)/(confirm|dismiss|remove|update)$#', $path, $matches)) {
         if ($matches[2] === 'update') {
             $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
             $updated = update_transaction($pdo, $userId, $controlId, $matches[1], normalize_transaction_changes($body));
@@ -136,8 +145,11 @@ try {
         if (!$updated) {
             respond(['error' => 'Lancamento nao encontrado'], 404);
         }
+        if ($matches[2] === 'confirm' && $updated['kind'] === 'expense' && $updated['dueDate']) {
+            $updated = update_transaction_status($pdo, $userId, $controlId, $matches[1], 'scheduled');
+        }
 
-        $verb = $matches[2] === 'confirm' ? 'confirmado' : 'descartado';
+        $verb = $matches[2] === 'confirm' ? 'confirmado' : ($matches[2] === 'remove' ? 'removido' : 'descartado');
         add_message($pdo, $userId, $controlId, 'assistant', "Lancamento {$verb}: {$updated['description']}");
         respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
     }
@@ -992,6 +1004,85 @@ function add_document(PDO $pdo, int $userId, int $controlId, array $document): v
     $stmt->execute([$controlId, $userId, $document['originalName'], $document['storedName'], $document['mimeType'], $document['status']]);
 }
 
+function serve_document(PDO $pdo, int $userId, int $controlId, string $id, array $env): void
+{
+    $stmt = $pdo->prepare('SELECT original_name AS originalName, stored_name AS storedName, mime_type AS mimeType FROM documents WHERE id = ? AND user_id = ? AND control_id = ? LIMIT 1');
+    $stmt->execute([$id, $userId, $controlId]);
+    $document = $stmt->fetch();
+    if (!$document) {
+        respond(['error' => 'Arquivo nao encontrado'], 404);
+    }
+
+    $objectName = document_object_name((string)$document['storedName']);
+    $uploadRoot = realpath(__DIR__ . '/uploads');
+    $content = null;
+    $filePath = $uploadRoot !== false ? realpath($uploadRoot . DIRECTORY_SEPARATOR . $objectName) : false;
+    if ($uploadRoot !== false && $filePath !== false && str_starts_with($filePath, $uploadRoot . DIRECTORY_SEPARATOR) && is_file($filePath)) {
+        $content = file_get_contents($filePath);
+    } elseif (str_starts_with((string)$document['storedName'], 'gs://')) {
+        $content = download_from_google_cloud_storage($env, (string)$document['storedName']);
+    }
+
+    if ($content === null || $content === false) {
+        respond(['error' => 'Arquivo indisponivel'], 404);
+    }
+
+    $filename = str_replace(['"', "\r", "\n"], '', (string)$document['originalName']);
+    header('Content-Type: ' . ((string)$document['mimeType'] ?: 'application/octet-stream'));
+    header('Content-Disposition: inline; filename="' . $filename . '"');
+    header('Cache-Control: private, max-age=120');
+    echo $content;
+    exit;
+}
+
+function download_from_google_cloud_storage(array $env, string $storedName): ?string
+{
+    $parsed = parse_google_storage_uri($storedName);
+    if ($parsed === null) {
+        return null;
+    }
+    $credentials = load_google_credentials($env);
+    if ($credentials === null || !function_exists('curl_init')) {
+        return null;
+    }
+
+    $token = google_access_token($credentials);
+    $url = 'https://storage.googleapis.com/storage/v1/b/' . rawurlencode($parsed['bucket']) . '/o/' . rawurlencode($parsed['objectName']) . '?alt=media';
+    $curl = curl_init($url);
+    curl_setopt_array($curl, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => ["Authorization: Bearer {$token}"],
+        CURLOPT_TIMEOUT => 30,
+    ]);
+    $content = curl_exec($curl);
+    $status = (int)curl_getinfo($curl, CURLINFO_HTTP_CODE);
+    curl_close($curl);
+    return $content !== false && $status >= 200 && $status < 300 ? (string)$content : null;
+}
+
+function parse_google_storage_uri(string $storedName): ?array
+{
+    if (!str_starts_with($storedName, 'gs://')) {
+        return null;
+    }
+    $withoutScheme = substr($storedName, 5);
+    $parts = explode('/', $withoutScheme);
+    $bucket = array_shift($parts);
+    $objectName = implode('/', $parts);
+    return $bucket && $objectName ? ['bucket' => $bucket, 'objectName' => $objectName] : null;
+}
+
+function document_object_name(string $storedName): string
+{
+    if (str_starts_with($storedName, 'gs://')) {
+        $withoutScheme = substr($storedName, 5);
+        $parts = explode('/', $withoutScheme);
+        array_shift($parts);
+        return implode('/', $parts);
+    }
+    return $storedName;
+}
+
 function update_document_status(PDO $pdo, int $userId, int $controlId, int $documentId, string $status): void
 {
     $stmt = $pdo->prepare('UPDATE documents SET status = ? WHERE id = ? AND user_id = ? AND control_id = ?');
@@ -1067,6 +1158,8 @@ function build_state(array $data, array $sessionPayload): array
     $income = sum_items(array_filter($monthTransactions, fn($item) => $item['kind'] === 'income'));
     $expenses = sum_items(array_filter($monthTransactions, fn($item) => $item['kind'] === 'expense'));
     $payable = array_values(array_filter($confirmed, fn($item) => $item['status'] === 'scheduled'));
+    $expenseCategories = group_by_category($monthTransactions, 'expense');
+    $incomeCategories = group_by_category($monthTransactions, 'income');
 
     return [
         'messages' => $data['messages'],
@@ -1080,7 +1173,10 @@ function build_state(array $data, array $sessionPayload): array
             'result' => round($income - $expenses, 2),
             'payableTotal' => sum_items($payable),
             'payableCount' => count($payable),
-            'categories' => group_by_category($monthTransactions),
+            'categories' => $expenseCategories,
+            'expenseCategories' => $expenseCategories,
+            'incomeCategories' => $incomeCategories,
+            'monthlySeries' => build_monthly_series($confirmed),
         ],
     ];
 }
@@ -1097,32 +1193,34 @@ function parse_financial_message(string $text, array $env = []): array
     if (!$amount) {
         return [
             'intent' => 'question',
-            'answer' => str_contains($normalized, 'quanto') || str_contains($normalized, 'gastei')
-                ? 'Ainda estou aprendendo a responder perguntas analiticas. Por enquanto, use o painel ao lado para acompanhar seus totais.'
-                : 'Nao encontrei um valor financeiro nessa mensagem. Tente algo como: paguei R$ 89,90 no mercado hoje.',
+            'answer' => answer_missing_amount($normalized, extract_date($normalized)),
         ];
     }
 
     $kind = detect_kind($normalized);
     $date = extract_date($normalized);
-    $isPayable = $kind === 'expense' && preg_match('/\b(vence|vencimento|pagar|boleto)\b/', $normalized);
+    $isPayable = detect_payable($normalized, $kind, $date);
+
+    $transaction = [
+        'kind' => $kind,
+        'status' => $isPayable ? 'scheduled' : 'confirmed',
+        'amount' => $amount,
+        'description' => mb_substr(preg_replace('/\s+/', ' ', trim($text)), 0, 160),
+        'merchant' => extract_merchant($text),
+        'paymentMethod' => detect_payment_method($normalized),
+        'transactionDate' => $date,
+        'dueDate' => $isPayable ? $date : null,
+        'category' => detect_category($normalized, $kind),
+        'source' => 'chat',
+        'rawText' => $text,
+        'confidence' => 1,
+    ];
+    $transactions = expand_recurring_transactions($transaction, $normalized);
 
     return [
         'intent' => 'transaction',
-        'transaction' => [
-            'kind' => $kind,
-            'status' => $isPayable ? 'scheduled' : 'confirmed',
-            'amount' => $amount,
-            'description' => mb_substr(preg_replace('/\s+/', ' ', trim($text)), 0, 160),
-            'merchant' => extract_merchant($text),
-            'paymentMethod' => detect_payment_method($normalized),
-            'transactionDate' => $date,
-            'dueDate' => $isPayable ? $date : null,
-            'category' => detect_category($normalized, $kind),
-            'source' => 'chat',
-            'rawText' => $text,
-            'confidence' => 1,
-        ],
+        'transaction' => $transactions[0],
+        'transactions' => $transactions,
     ];
 }
 
@@ -1144,7 +1242,7 @@ function parse_with_openai(string $text, array $env): ?array
         'messages' => [
             [
                 'role' => 'system',
-                'content' => 'Voce extrai dados financeiros pessoais de mensagens em portugues do Brasil. Responda somente JSON valido. Se houver transacao, use intent transaction. Se for pergunta ou texto sem valor financeiro, use intent question.',
+                'content' => 'Voce extrai dados financeiros pessoais de mensagens em portugues do Brasil. Responda somente JSON valido. Se houver transacao, use intent transaction. Nunca invente valor. Se nao houver valor monetario explicito, use intent question e peca o valor. Datas relativas como proxima quarta devem virar transactionDate e dueDate quando for conta, boleto ou fatura. Se a mensagem indicar recorrencia, parcelas ou duracao, retorne uma transacao por ocorrencia em transactions. Exemplos: por 3 meses, durante 3 meses, 3 parcelas, 3x geram 3 itens mensais. Se for pergunta ou texto sem valor financeiro, use intent question.',
             ],
             [
                 'role' => 'user',
@@ -1154,6 +1252,7 @@ function parse_with_openai(string $text, array $env): ?array
                     'schema' => [
                         'intent' => 'transaction|question',
                         'answer' => 'string opcional para question',
+                        'transactions' => 'array opcional de transaction quando houver recorrencia ou parcelas',
                         'transaction' => [
                             'kind' => 'income|expense',
                             'amount' => 'number',
@@ -1306,7 +1405,39 @@ function normalize_ai_result(array $result, string $rawText, string $today): ?ar
         ];
     }
 
-    $transaction = $result['transaction'] ?? [];
+    $normalizedRawText = normalize_text($rawText);
+    if (!str_starts_with($rawText, 'Arquivo:') && extract_amount($normalizedRawText) === null) {
+        return [
+            'intent' => 'question',
+            'answer' => answer_missing_amount($normalizedRawText, extract_date($normalizedRawText)),
+        ];
+    }
+
+    $candidates = is_array($result['transactions'] ?? null) && count($result['transactions']) > 0
+        ? $result['transactions']
+        : [$result['transaction'] ?? []];
+    $transactions = [];
+    foreach ($candidates as $transaction) {
+        if (is_array($transaction)) {
+            $normalized = normalize_ai_transaction($transaction, $rawText, $today);
+            if ($normalized !== null) {
+                $transactions[] = $normalized;
+            }
+        }
+    }
+    if (count($transactions) === 0) {
+        return null;
+    }
+
+    return [
+        'intent' => 'transaction',
+        'transaction' => $transactions[0],
+        'transactions' => $transactions,
+    ];
+}
+
+function normalize_ai_transaction(array $transaction, string $rawText, string $today): ?array
+{
     $amount = (float)($transaction['amount'] ?? 0);
     if ($amount <= 0) {
         return null;
@@ -1315,23 +1446,23 @@ function normalize_ai_result(array $result, string $rawText, string $today): ?ar
     $kind = ($transaction['kind'] ?? '') === 'income' ? 'income' : 'expense';
     $transactionDate = is_iso_date((string)($transaction['transactionDate'] ?? '')) ? (string)$transaction['transactionDate'] : $today;
     $dueDate = is_iso_date((string)($transaction['dueDate'] ?? '')) ? (string)$transaction['dueDate'] : null;
+    $detectedCategory = detect_category(normalize_text($rawText), $kind);
+    $aiCategory = normalize_category((string)($transaction['category'] ?? ''), $kind);
+    $category = $aiCategory === 'Outros' && $detectedCategory !== 'Outros' ? $detectedCategory : $aiCategory;
 
     return [
-        'intent' => 'transaction',
-        'transaction' => [
-            'kind' => $kind,
-            'status' => $dueDate && $kind === 'expense' ? 'scheduled' : 'confirmed',
-            'amount' => $amount,
-            'description' => mb_substr(trim((string)($transaction['description'] ?? $rawText)) ?: $rawText, 0, 160),
-            'merchant' => trim((string)($transaction['merchant'] ?? '')) ?: null,
-            'paymentMethod' => trim((string)($transaction['paymentMethod'] ?? '')) ?: null,
-            'transactionDate' => $transactionDate,
-            'dueDate' => $dueDate,
-            'category' => normalize_category((string)($transaction['category'] ?? ''), $kind),
-            'source' => 'chat',
-            'rawText' => $rawText,
-            'confidence' => max(0, min(1, (float)($transaction['confidence'] ?? 0.8))),
-        ],
+        'kind' => $kind,
+        'status' => $dueDate && $kind === 'expense' ? 'scheduled' : 'confirmed',
+        'amount' => $amount,
+        'description' => mb_substr(trim((string)($transaction['description'] ?? $rawText)) ?: $rawText, 0, 160),
+        'merchant' => trim((string)($transaction['merchant'] ?? '')) ?: null,
+        'paymentMethod' => trim((string)($transaction['paymentMethod'] ?? '')) ?: null,
+        'transactionDate' => $transactionDate,
+        'dueDate' => $dueDate,
+        'category' => $category,
+        'source' => 'chat',
+        'rawText' => $rawText,
+        'confidence' => max(0, min(1, (float)($transaction['confidence'] ?? 0.8))),
     ];
 }
 
@@ -1344,6 +1475,53 @@ function normalize_category(string $category, string $kind): string
 function is_iso_date(string $value): bool
 {
     return preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) === 1;
+}
+
+function expand_recurring_transactions(array $transaction, string $text): array
+{
+    $count = extract_recurrence_count($text);
+    if ($count === null || $count <= 1) {
+        return [$transaction];
+    }
+
+    $transactions = [];
+    for ($index = 0; $index < $count; $index++) {
+        $copy = $transaction;
+        $copy['description'] = mb_substr($transaction['description'] . ' (' . ($index + 1) . "/{$count})", 0, 160);
+        $copy['transactionDate'] = add_months_to_iso_date($transaction['transactionDate'], $index);
+        $copy['dueDate'] = $transaction['dueDate'] ? add_months_to_iso_date($transaction['dueDate'], $index) : null;
+        $transactions[] = $copy;
+    }
+    return $transactions;
+}
+
+function extract_recurrence_count(string $text): ?int
+{
+    $patterns = [
+        '/\bpor\s+(\d{1,2})\s+(?:mes|meses)\b/',
+        '/\bdurante\s+(\d{1,2})\s+(?:mes|meses)\b/',
+        '/\b(\d{1,2})\s+(?:parcelas|meses)\b/',
+        '/\b(\d{1,2})x\b/',
+    ];
+    foreach ($patterns as $pattern) {
+        if (preg_match($pattern, $text, $matches)) {
+            $count = (int)$matches[1];
+            return $count > 1 && $count <= 60 ? $count : null;
+        }
+    }
+    return null;
+}
+
+function add_months_to_iso_date(string $isoDate, int $months): string
+{
+    $date = DateTimeImmutable::createFromFormat('!Y-m-d', $isoDate, new DateTimeZone('UTC'));
+    if (!$date) {
+        return $isoDate;
+    }
+    $day = (int)$date->format('d');
+    $target = $date->modify('first day of +' . $months . ' month');
+    $lastDay = (int)$target->format('t');
+    return $target->setDate((int)$target->format('Y'), (int)$target->format('m'), min($day, $lastDay))->format('Y-m-d');
 }
 
 function normalize_transaction_changes(array $body): array
@@ -1380,7 +1558,7 @@ function extract_amount(string $text): ?float
     $patterns = [
         '/r\$\s*(\d{1,3}(?:\.\d{3})+|\d+)(?:,(\d{2}))?/i',
         '/\b(\d{1,3}(?:\.\d{3})+|\d+),(\d{2})\b/i',
-        '/\b(?:valor|de|por|gastei|paguei|comprei|recebi)\s+(\d{1,3}(?:\.\d{3})+|\d+)\b/i',
+        '/\b(?:valor|de|gastei|paguei|comprei|recebi)\s+(\d{1,3}(?:\.\d{3})+|\d+)\b/i',
         '/\b(\d{1,3}(?:\.\d{3})+|\d+)\s+(?:reais|real)\b/i',
     ];
     foreach ($patterns as $pattern) {
@@ -1398,6 +1576,17 @@ function detect_kind(string $text): string
     return preg_match('/\b(recebi|receita|salario|pix recebido|deposito)\b/', $text) ? 'income' : 'expense';
 }
 
+function detect_payable(string $text, string $kind, string $date): bool
+{
+    if ($kind !== 'expense') {
+        return false;
+    }
+    if (preg_match('/\b(vence|vencimento|pagar|boleto|conta|fatura)\b/', $text)) {
+        return true;
+    }
+    return $date > date('Y-m-d') && preg_match('/\b(pra|para|proxim[ao]|venc)\b/', $text);
+}
+
 function extract_date(string $text): string
 {
     $timestamp = time();
@@ -1412,8 +1601,39 @@ function extract_date(string $text): string
         $timestamp = strtotime('-1 day');
     } elseif (str_contains($text, 'amanha')) {
         $timestamp = strtotime('+1 day');
+    } else {
+        $weekday = extract_weekday($text);
+        if ($weekday !== null) {
+            $current = (int)date('w', $timestamp);
+            $diff = ($weekday - $current + 7) % 7;
+            $timestamp = strtotime('+' . ($diff ?: 7) . ' day', $timestamp);
+        }
     }
     return date('Y-m-d', $timestamp);
+}
+
+function extract_weekday(string $text): ?int
+{
+    if (!preg_match('/\b(proxim[ao]|pra|para|vence|vencimento)\b/', $text)) {
+        return null;
+    }
+    $weekdays = [
+        'domingo' => 0,
+        'segunda' => 1,
+        'terca' => 2,
+        'terça' => 2,
+        'quarta' => 3,
+        'quinta' => 4,
+        'sexta' => 5,
+        'sabado' => 6,
+        'sábado' => 6,
+    ];
+    foreach ($weekdays as $name => $index) {
+        if (str_contains($text, $name)) {
+            return $index;
+        }
+    }
+    return null;
 }
 
 function detect_category(string $text, string $kind): string
@@ -1464,11 +1684,47 @@ function summarize_transaction(array $transaction): string
     return "Registrei uma {$type} de {$money} em {$transaction['category']}, com data {$when}.{$due}";
 }
 
+function summarize_transactions(array $transactions): string
+{
+    $first = $transactions[0];
+    $last = $transactions[count($transactions) - 1];
+    $sameAmount = count(array_filter($transactions, fn($item) => (float)$item['amount'] === (float)$first['amount'])) === count($transactions);
+    $sameCategory = count(array_filter($transactions, fn($item) => $item['category'] === $first['category'])) === count($transactions);
+    $sameKind = count(array_filter($transactions, fn($item) => $item['kind'] === $first['kind'])) === count($transactions);
+
+    if ($sameAmount && $sameCategory && $sameKind) {
+        $money = 'R$ ' . number_format((float)$first['amount'], 2, ',', '.');
+        $type = $first['kind'] === 'income' ? 'receitas' : 'despesas';
+        $hasDueDate = count(array_filter($transactions, fn($item) => !empty($item['dueDate']))) > 0;
+        $label = $hasDueDate ? 'com vencimentos' : 'com datas';
+        $startDate = date('d/m/Y', strtotime((string)($first['dueDate'] ?: $first['transactionDate'])));
+        $endDate = date('d/m/Y', strtotime((string)($last['dueDate'] ?: $last['transactionDate'])));
+        return "Registrei " . count($transactions) . " {$type} pendentes de {$money} em {$first['category']}, {$label} de {$startDate} a {$endDate}.";
+    }
+
+    return 'Registrei ' . count($transactions) . ' lancamentos pendentes.';
+}
+
 function normalize_text(string $text): string
 {
     $lower = mb_strtolower($text, 'UTF-8');
     $converted = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $lower);
     return $converted === false ? $lower : $converted;
+}
+
+function answer_missing_amount(string $text, string $date): string
+{
+    if (preg_match('/\b(vence|vencimento|pagar|boleto|conta|fatura)\b/', $text) || extract_recurrence_count($text) !== null) {
+        $when = $date ? ' para ' . date('d/m/Y', strtotime($date)) : '';
+        $recurrence = extract_recurrence_count($text);
+        $repeat = $recurrence ? " e repetindo por {$recurrence} meses" : '';
+        return "Entendi a conta{$when}{$repeat}, mas preciso do valor para registrar. Exemplo: conta da internet de R$ 120 para proxima quarta por 10 meses.";
+    }
+
+    if (str_contains($text, 'quanto') || str_contains($text, 'gastei')) {
+        return 'Ainda estou aprendendo a responder perguntas analiticas. Por enquanto, use o painel ao lado para acompanhar seus totais.';
+    }
+    return 'Nao encontrei um valor financeiro nessa mensagem. Tente algo como: paguei R$ 89,90 no mercado hoje.';
 }
 
 function normalize_transaction(array $row): array
@@ -1496,11 +1752,11 @@ function sum_items(iterable $items): float
     return round($total, 2);
 }
 
-function group_by_category(array $items): array
+function group_by_category(array $items, string $kind = 'expense'): array
 {
     $groups = [];
     foreach ($items as $item) {
-        if ($item['kind'] !== 'expense') {
+        if ($item['kind'] !== $kind) {
             continue;
         }
         $groups[$item['category']] = ($groups[$item['category']] ?? 0) + (float)$item['amount'];
@@ -1511,6 +1767,99 @@ function group_by_category(array $items): array
         $result[] = ['name' => $name, 'amount' => round($amount, 2)];
     }
     return $result;
+}
+
+function build_monthly_series(array $transactions): array
+{
+    $months = [];
+    $start = new DateTimeImmutable('first day of -5 months');
+    for ($index = 0; $index < 6; $index++) {
+        $date = $start->modify("+{$index} months");
+        $key = $date->format('Y-m');
+        $months[$key] = [
+            'key' => $key,
+            'label' => $date->format('m/y'),
+            'shortLabel' => $date->format('m'),
+            'income' => 0.0,
+            'expenses' => 0.0,
+            'result' => 0.0,
+        ];
+    }
+
+    foreach ($transactions as $transaction) {
+        $key = substr((string)$transaction['transactionDate'], 0, 7);
+        if (!isset($months[$key])) {
+            continue;
+        }
+        if ($transaction['kind'] === 'income') {
+            $months[$key]['income'] += (float)$transaction['amount'];
+        } elseif ($transaction['kind'] === 'expense') {
+            $months[$key]['expenses'] += (float)$transaction['amount'];
+        }
+    }
+
+    return array_map(function ($item) {
+        $item['income'] = round((float)$item['income'], 2);
+        $item['expenses'] = round((float)$item['expenses'], 2);
+        $item['result'] = round($item['income'] - $item['expenses'], 2);
+        return $item;
+    }, array_values($months));
+}
+
+function answer_analytical_question(string $message, array $data): ?string
+{
+    $text = normalize_text($message);
+    $isPayableQuestion =
+        preg_match('/\b(contas?|boletos?|faturas?|vencimentos?)\b/', $text) &&
+        preg_match('/\b(pagar|vencer|vence|proxim[ao]s?)\b/', $text);
+    if (!$isPayableQuestion) {
+        return null;
+    }
+
+    $period = resolve_question_period($text);
+    $items = array_values(array_filter($data['transactions'], function ($item) use ($period) {
+        $date = (string)($item['dueDate'] ?: $item['transactionDate']);
+        return $item['kind'] === 'expense'
+            && $item['status'] === 'scheduled'
+            && $date >= $period['start']
+            && $date <= $period['end'];
+    }));
+
+    usort($items, fn($a, $b) => strcmp((string)($a['dueDate'] ?: $a['transactionDate']), (string)($b['dueDate'] ?: $b['transactionDate'])));
+
+    if (count($items) === 0) {
+        return "Voce nao tem contas agendadas para pagar {$period['label']}.";
+    }
+
+    $total = sum_items($items);
+    $lines = array_map(function ($item) {
+        $date = date('d/m', strtotime((string)($item['dueDate'] ?: $item['transactionDate'])));
+        $money = 'R$ ' . number_format((float)$item['amount'], 2, ',', '.');
+        return "{$date}: {$item['description']} ({$money})";
+    }, array_slice($items, 0, 8));
+    $extra = count($items) > 8 ? ' Tenho mais ' . (count($items) - 8) . ' alem dessas.' : '';
+    $plural = count($items) > 1 ? 's' : '';
+    $money = 'R$ ' . number_format($total, 2, ',', '.');
+
+    return 'Voce tem ' . count($items) . " conta{$plural} para pagar {$period['label']}, totalizando {$money}. " . implode(' ', $lines) . $extra;
+}
+
+function resolve_question_period(string $text): array
+{
+    $today = date('Y-m-d');
+
+    if (str_contains($text, 'hoje')) {
+        return ['start' => $today, 'end' => $today, 'label' => 'hoje'];
+    }
+    if (str_contains($text, 'amanha')) {
+        $tomorrow = date('Y-m-d', strtotime('+1 day'));
+        return ['start' => $tomorrow, 'end' => $tomorrow, 'label' => 'amanha'];
+    }
+    if (str_contains($text, 'semana')) {
+        return ['start' => $today, 'end' => date('Y-m-d', strtotime('+6 days')), 'label' => 'esta semana'];
+    }
+
+    return ['start' => $today, 'end' => date('Y-m-d', strtotime('+30 days')), 'label' => 'nos proximos 30 dias'];
 }
 
 function respond(array $payload, int $status = 200): void

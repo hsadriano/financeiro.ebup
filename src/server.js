@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { loadEnv, hasDatabaseConfig } from "./config.js";
 import { JsonStorage } from "./storage.js";
 import { MariaDbStorage } from "./mariadb-storage.js";
-import { parseFinancialImage, parseFinancialMessage, summarizeTransaction } from "./parser.js";
+import { parseFinancialImage, parseFinancialMessage, summarizeTransaction, summarizeTransactions } from "./parser.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -28,6 +28,12 @@ const mimeTypes = {
   ".json": "application/json; charset=utf-8",
   ".png": "image/png",
   ".svg": "image/svg+xml",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".pdf": "application/pdf",
+  ".txt": "text/plain; charset=utf-8",
   ".webmanifest": "application/manifest+json; charset=utf-8"
 };
 
@@ -116,6 +122,11 @@ const server = createServer(async (request, response) => {
       return sendJson(response, { ...buildState(await storage.read()), session: await sessionPayload(session) });
     }
 
+    if (request.method === "GET" && /^\/api\/documents\/[^/]+\/view$/.test(url.pathname)) {
+      const [, , , id] = url.pathname.split("/");
+      return sendDocument(response, await documentFileFor(id));
+    }
+
     if (request.method === "POST" && url.pathname === "/api/chat") {
       const body = await readJson(request);
       await storage.addMessage({ role: "user", content: body.message });
@@ -123,10 +134,17 @@ const server = createServer(async (request, response) => {
 
       let assistantContent;
       if (parsed.intent === "transaction") {
-        const saved = await storage.addTransaction({ ...parsed.transaction, status: "pending" });
-        assistantContent = `${summarizeTransaction(saved)} Confira os dados e confirme para salvar nos relatorios.`;
+        const transactions = parsed.transactions || [parsed.transaction];
+        const saved = [];
+        for (const transaction of transactions) {
+          saved.push(await storage.addTransaction({ ...transaction, status: "pending" }));
+        }
+        assistantContent =
+          saved.length > 1
+            ? `${summarizeTransactions(saved)} Confira os dados e confirme para salvar nos relatorios.`
+            : `${summarizeTransaction(saved[0])} Confira os dados e confirme para salvar nos relatorios.`;
       } else {
-        assistantContent = parsed.answer;
+        assistantContent = answerAnalyticalQuestion(body.message, await storage.read()) || parsed.answer;
       }
 
       await storage.addMessage({ role: "assistant", content: assistantContent });
@@ -135,7 +153,7 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "POST" && url.pathname.startsWith("/api/transactions/")) {
       const [, , , id, action] = url.pathname.split("/");
-      if (!id || !["confirm", "dismiss", "update"].includes(action)) {
+      if (!id || !["confirm", "dismiss", "remove", "update"].includes(action)) {
         return sendJson(response, { error: "Acao invalida" }, 400);
       }
 
@@ -147,11 +165,15 @@ const server = createServer(async (request, response) => {
         return sendJson(response, buildState(await storage.read()));
       }
 
-      const status = action === "confirm" ? "confirmed" : "dismissed";
-      const updated = await storage.updateTransactionStatus(id, status);
+      let status = action === "confirm" ? "confirmed" : "dismissed";
+      let updated = await storage.updateTransactionStatus(id, status);
       if (!updated) return sendJson(response, { error: "Lancamento nao encontrado" }, 404);
+      if (action === "confirm" && updated.kind === "expense" && updated.dueDate) {
+        status = "scheduled";
+        updated = await storage.updateTransactionStatus(id, status);
+      }
 
-      const verb = action === "confirm" ? "confirmado" : "descartado";
+      const verb = action === "confirm" ? "confirmado" : action === "remove" ? "removido" : "descartado";
       await storage.addMessage({ role: "assistant", content: `Lancamento ${verb}: ${updated.description}` });
       return sendJson(response, buildState(await storage.read()));
     }
@@ -229,7 +251,9 @@ function buildState(data) {
   const payable = data.transactions
     .filter((item) => item.status === "scheduled")
     .sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
-  const categories = groupByCategory(monthTransactions);
+  const expenseCategories = groupByCategory(monthTransactions, "expense");
+  const incomeCategories = groupByCategory(monthTransactions, "income");
+  const monthlySeries = buildMonthlySeries(confirmedTransactions, now);
 
   return {
     messages: data.messages,
@@ -242,7 +266,10 @@ function buildState(data) {
       result: income - expenses,
       payableTotal: sum(payable),
       payableCount: payable.length,
-      categories
+      categories: expenseCategories,
+      expenseCategories,
+      incomeCategories,
+      monthlySeries
     }
   };
 }
@@ -251,15 +278,186 @@ function sum(items) {
   return Number(items.reduce((total, item) => total + Number(item.amount || 0), 0).toFixed(2));
 }
 
-function groupByCategory(items) {
+function groupByCategory(items, kind = "expense") {
   const groups = new Map();
   for (const item of items) {
-    if (item.kind !== "expense") continue;
+    if (item.kind !== kind) continue;
     groups.set(item.category, (groups.get(item.category) || 0) + Number(item.amount));
   }
   return [...groups.entries()]
     .map(([name, amount]) => ({ name, amount: Number(amount.toFixed(2)) }))
     .sort((a, b) => b.amount - a.amount);
+}
+
+function buildMonthlySeries(transactions, now) {
+  const months = [];
+  const cursor = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 5, 1));
+  for (let index = 0; index < 6; index += 1) {
+    const key = cursor.toISOString().slice(0, 7);
+    months.push({
+      key,
+      label: new Intl.DateTimeFormat("pt-BR", { month: "short", year: "2-digit", timeZone: "UTC" }).format(cursor),
+      shortLabel: new Intl.DateTimeFormat("pt-BR", { month: "short", timeZone: "UTC" }).format(cursor).replace(".", ""),
+      income: 0,
+      expenses: 0,
+      result: 0
+    });
+    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+  }
+
+  const byKey = new Map(months.map((item) => [item.key, item]));
+  for (const transaction of transactions) {
+    const bucket = byKey.get(String(transaction.transactionDate).slice(0, 7));
+    if (!bucket) continue;
+    if (transaction.kind === "income") bucket.income += Number(transaction.amount || 0);
+    if (transaction.kind === "expense") bucket.expenses += Number(transaction.amount || 0);
+  }
+
+  return months.map((item) => ({
+    ...item,
+    income: Number(item.income.toFixed(2)),
+    expenses: Number(item.expenses.toFixed(2)),
+    result: Number((item.income - item.expenses).toFixed(2))
+  }));
+}
+
+function answerAnalyticalQuestion(message, data) {
+  const text = normalizeText(message);
+  const isPayableQuestion =
+    /\b(contas?|boletos?|faturas?|vencimentos?)\b/.test(text) &&
+    /\b(pagar|vencer|vence|proxim[ao]s?)\b/.test(text);
+  if (!isPayableQuestion) return null;
+
+  const { start, end, label } = resolveQuestionPeriod(text);
+  const items = data.transactions
+    .filter((item) => item.kind === "expense" && item.status === "scheduled")
+    .filter((item) => {
+      const date = item.dueDate || item.transactionDate;
+      return date >= start && date <= end;
+    })
+    .sort((a, b) => String(a.dueDate || a.transactionDate).localeCompare(String(b.dueDate || b.transactionDate)));
+
+  if (!items.length) {
+    return `Voce nao tem contas agendadas para pagar ${label}.`;
+  }
+
+  const total = sum(items);
+  const lines = items
+    .slice(0, 8)
+    .map((item) => `${formatShortDate(item.dueDate || item.transactionDate)}: ${item.description} (${formatMoney(item.amount)})`);
+  const extra = items.length > 8 ? ` Tenho mais ${items.length - 8} alem dessas.` : "";
+  return `Voce tem ${items.length} conta${items.length > 1 ? "s" : ""} para pagar ${label}, totalizando ${formatMoney(total)}. ${lines.join(" ")}${extra}`;
+}
+
+function resolveQuestionPeriod(text) {
+  const today = new Date();
+  const start = toIsoDate(today);
+  const end = new Date(today);
+
+  if (text.includes("hoje")) {
+    return { start, end: start, label: "hoje" };
+  }
+  if (text.includes("amanha")) {
+    end.setDate(today.getDate() + 1);
+    const iso = toIsoDate(end);
+    return { start: iso, end: iso, label: "amanha" };
+  }
+  if (text.includes("semana")) {
+    end.setDate(today.getDate() + 6);
+    return { start, end: toIsoDate(end), label: "esta semana" };
+  }
+
+  end.setDate(today.getDate() + 30);
+  return { start, end: toIsoDate(end), label: "nos proximos 30 dias" };
+}
+
+function normalizeText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function toIsoDate(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function formatShortDate(value) {
+  return new Intl.DateTimeFormat("pt-BR", { timeZone: "UTC", day: "2-digit", month: "2-digit" }).format(new Date(`${value}T00:00:00Z`));
+}
+
+function formatMoney(value) {
+  return Number(value || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+
+async function documentFileFor(id) {
+  const data = await storage.read();
+  const document = data.documents.find((item) => String(item.id) === String(id));
+  if (!document) {
+    const error = new Error("Arquivo nao encontrado.");
+    error.status = 404;
+    throw error;
+  }
+
+  const objectName = documentObjectName(document.storedName);
+  const filePath = path.resolve(uploadDir, objectName);
+  const uploadRoot = path.resolve(uploadDir);
+  if (!filePath.startsWith(`${uploadRoot}${path.sep}`)) {
+    const error = new Error("Arquivo invalido.");
+    error.status = 400;
+    throw error;
+  }
+
+  let content;
+  try {
+    content = await readFile(filePath);
+  } catch (error) {
+    if (error.code === "ENOENT" && String(document.storedName || "").startsWith("gs://")) {
+      content = await downloadFromGoogleCloudStorage(document.storedName);
+    } else if (error.code === "ENOENT") {
+      const notFound = new Error("Arquivo indisponivel.");
+      notFound.status = 404;
+      throw notFound;
+    }
+    throw error;
+  }
+  return { document, content };
+}
+
+async function downloadFromGoogleCloudStorage(storedName) {
+  const { bucket, objectName } = parseGoogleStorageUri(storedName);
+  const credentials = await loadGoogleCredentials();
+  if (!credentials) {
+    const error = new Error("Arquivo indisponivel.");
+    error.status = 404;
+    throw error;
+  }
+
+  const token = await getGoogleAccessToken(credentials);
+  const url = new URL(`https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(objectName)}`);
+  url.searchParams.set("alt", "media");
+  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) {
+    const error = new Error("Arquivo indisponivel.");
+    error.status = response.status === 404 ? 404 : 502;
+    throw error;
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
+
+function parseGoogleStorageUri(storedName) {
+  const withoutScheme = String(storedName || "").slice("gs://".length);
+  const [bucket, ...objectParts] = withoutScheme.split("/");
+  return { bucket, objectName: objectParts.join("/") };
+}
+
+function documentObjectName(storedName) {
+  const value = String(storedName || "");
+  if (value.startsWith("gs://")) {
+    const withoutScheme = value.slice("gs://".length);
+    return withoutScheme.split("/").slice(1).join("/");
+  }
+  return value;
 }
 
 function normalizeTransactionChanges(body) {
@@ -441,6 +639,18 @@ async function serveStatic(response, pathname, method = "GET") {
 function sendJson(response, payload, status = 200) {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(payload));
+}
+
+function sendDocument(response, { document, content }) {
+  const extension = path.extname(document.originalName || document.storedName || "");
+  const contentType = document.mimeType || mimeTypes[extension] || "application/octet-stream";
+  const filename = String(document.originalName || "arquivo").replace(/["\r\n]/g, "");
+  response.writeHead(200, {
+    "Content-Type": contentType,
+    "Content-Disposition": `inline; filename="${filename}"`,
+    "Cache-Control": "private, max-age=120"
+  });
+  response.end(content);
 }
 
 function parseCookies(request) {
