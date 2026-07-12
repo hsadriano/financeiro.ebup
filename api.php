@@ -1027,11 +1027,53 @@ function serve_document(PDO $pdo, int $userId, int $controlId, string $id, array
         respond(['error' => 'Arquivo indisponivel'], 404);
     }
 
+    if (str_starts_with((string)$document['mimeType'], 'image/') && (string)($_GET['raw'] ?? '') !== '1') {
+        serve_image_viewer($id, $document);
+    }
+
     $filename = str_replace(['"', "\r", "\n"], '', (string)$document['originalName']);
     header('Content-Type: ' . ((string)$document['mimeType'] ?: 'application/octet-stream'));
     header('Content-Disposition: inline; filename="' . $filename . '"');
     header('Cache-Control: private, max-age=120');
     echo $content;
+    exit;
+}
+
+function serve_image_viewer(string $id, array $document): void
+{
+    $filename = htmlspecialchars((string)($document['originalName'] ?? 'Imagem'), ENT_QUOTES, 'UTF-8');
+    $imageUrl = '/api/documents/' . rawurlencode($id) . '/view?raw=1';
+    header('Content-Type: text/html; charset=utf-8');
+    header('Cache-Control: private, max-age=120');
+    echo '<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>' . $filename . '</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100dvh; color: #1b2620; background: #101512; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .viewer { display: grid; grid-template-rows: auto 1fr; min-height: 100dvh; }
+    header { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: calc(10px + env(safe-area-inset-top)) 12px 10px; background: rgba(255,255,255,.96); }
+    strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    button { min-height: 38px; padding: 0 12px; border: 1px solid #dbe3de; border-radius: 8px; color: #1b2620; background: #fff; font: inherit; font-weight: 800; }
+    main { display: grid; place-items: center; min-height: 0; padding: 12px; }
+    img { max-width: 100%; max-height: calc(100dvh - 82px - env(safe-area-inset-top)); object-fit: contain; border-radius: 8px; background: #fff; }
+  </style>
+</head>
+<body>
+  <div class="viewer">
+    <header>
+      <strong>' . $filename . '</strong>
+      <button type="button" onclick="window.close(); if (!window.closed) history.back();">Fechar</button>
+    </header>
+    <main>
+      <img src="' . htmlspecialchars($imageUrl, ENT_QUOTES, 'UTF-8') . '" alt="' . $filename . '" />
+    </main>
+  </div>
+</body>
+</html>';
     exit;
 }
 

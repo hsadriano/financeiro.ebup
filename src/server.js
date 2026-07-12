@@ -124,7 +124,7 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "GET" && /^\/api\/documents\/[^/]+\/view$/.test(url.pathname)) {
       const [, , , id] = url.pathname.split("/");
-      return sendDocument(response, await documentFileFor(id));
+      return sendDocument(response, await documentFileFor(id), url.searchParams);
     }
 
     if (request.method === "POST" && url.pathname === "/api/chat") {
@@ -641,16 +641,66 @@ function sendJson(response, payload, status = 200) {
   response.end(JSON.stringify(payload));
 }
 
-function sendDocument(response, { document, content }) {
+function sendDocument(response, { document, content }, searchParams = new URLSearchParams()) {
   const extension = path.extname(document.originalName || document.storedName || "");
   const contentType = document.mimeType || mimeTypes[extension] || "application/octet-stream";
   const filename = String(document.originalName || "arquivo").replace(/["\r\n]/g, "");
+  if (contentType.startsWith("image/") && searchParams.get("raw") !== "1") {
+    return sendImageViewer(response, document);
+  }
   response.writeHead(200, {
     "Content-Type": contentType,
     "Content-Disposition": `inline; filename="${filename}"`,
     "Cache-Control": "private, max-age=120"
   });
   response.end(content);
+}
+
+function sendImageViewer(response, document) {
+  const filename = escapeHtml(String(document.originalName || "Imagem"));
+  const imageUrl = `/api/documents/${encodeURIComponent(document.id)}/view?raw=1`;
+  response.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "private, max-age=120"
+  });
+  response.end(`<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>${filename}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100dvh; color: #1b2620; background: #101512; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .viewer { display: grid; grid-template-rows: auto 1fr; min-height: 100dvh; }
+    header { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: calc(10px + env(safe-area-inset-top)) 12px 10px; background: rgba(255,255,255,.96); }
+    strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    button, a { min-height: 38px; padding: 0 12px; border: 1px solid #dbe3de; border-radius: 8px; color: #1b2620; background: #fff; font: inherit; font-weight: 800; text-decoration: none; }
+    main { display: grid; place-items: center; min-height: 0; padding: 12px; }
+    img { max-width: 100%; max-height: calc(100dvh - 82px - env(safe-area-inset-top)); object-fit: contain; border-radius: 8px; background: #fff; }
+  </style>
+</head>
+<body>
+  <div class="viewer">
+    <header>
+      <strong>${filename}</strong>
+      <button type="button" onclick="window.close(); if (!window.closed) history.back();">Fechar</button>
+    </header>
+    <main>
+      <img src="${imageUrl}" alt="${filename}" />
+    </main>
+  </div>
+</body>
+</html>`);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function parseCookies(request) {
