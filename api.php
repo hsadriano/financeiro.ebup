@@ -110,20 +110,35 @@ try {
         }
 
         add_message($pdo, $userId, $controlId, 'user', $message);
-        $parsed = parse_financial_message($message, $env);
+        $data = read_data($pdo, $userId, $controlId);
+        $assistantResult = run_financial_assistant($message, $data, $env);
 
-        if ($parsed['intent'] === 'transaction') {
-            $transactions = $parsed['transactions'] ?? [$parsed['transaction']];
+        if (($assistantResult['kind'] ?? '') === 'transactions') {
             $saved = [];
-            foreach ($transactions as $transaction) {
+            foreach ($assistantResult['transactions'] as $transaction) {
                 $transaction['status'] = 'pending';
                 $saved[] = add_transaction($pdo, $userId, $controlId, $transaction);
             }
             $assistant = count($saved) > 1
                 ? summarize_transactions($saved) . ' Confira os dados e confirme para salvar nos relatorios.'
                 : summarize_transaction($saved[0]) . ' Confira os dados e confirme para salvar nos relatorios.';
+        } elseif (($assistantResult['kind'] ?? '') === 'answer') {
+            $assistant = (string)$assistantResult['answer'];
         } else {
-            $assistant = answer_analytical_question($message, read_data($pdo, $userId, $controlId)) ?: $parsed['answer'];
+            $parsed = parse_financial_message($message, $env);
+            if ($parsed['intent'] === 'transaction') {
+                $transactions = $parsed['transactions'] ?? [$parsed['transaction']];
+                $saved = [];
+                foreach ($transactions as $transaction) {
+                    $transaction['status'] = 'pending';
+                    $saved[] = add_transaction($pdo, $userId, $controlId, $transaction);
+                }
+                $assistant = count($saved) > 1
+                    ? summarize_transactions($saved) . ' Confira os dados e confirme para salvar nos relatorios.'
+                    : summarize_transaction($saved[0]) . ' Confira os dados e confirme para salvar nos relatorios.';
+            } else {
+                $assistant = answer_analytical_question($message, $data) ?: $parsed['answer'];
+            }
         }
 
         add_message($pdo, $userId, $controlId, 'assistant', $assistant);
@@ -1236,6 +1251,259 @@ function build_state(array $data, array $sessionPayload): array
     ];
 }
 
+function run_financial_assistant(string $message, array $data, array $env): ?array
+{
+    $apiKey = trim((string)($env['OPENAI_API_KEY'] ?? ''));
+    if ($apiKey === '' || !function_exists('curl_init')) return null;
+
+    $baseUrl = rtrim((string)($env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'), '/');
+    $model = trim((string)($env['OPENAI_CHAT_MODEL'] ?? 'gpt-4.1-mini')) ?: 'gpt-4.1-mini';
+    $history = array_slice(array_values(array_filter($data['messages'] ?? [], function ($item) {
+        return in_array($item['role'] ?? '', ['user', 'assistant'], true) && trim((string)($item['content'] ?? '')) !== '';
+    })), -12);
+    $input = array_map(fn($item) => [
+        'role' => $item['role'],
+        'content' => mb_substr((string)$item['content'], 0, 2000),
+    ], $history);
+    $last = $input ? $input[count($input) - 1] : null;
+    if (!$last || $last['role'] !== 'user' || $last['content'] !== $message) {
+        $input[] = ['role' => 'user', 'content' => $message];
+    }
+
+    try {
+        for ($turn = 0; $turn < 4; $turn++) {
+            $payload = openai_response_request($baseUrl, $apiKey, [
+                'model' => $model,
+                'store' => false,
+                'instructions' => financial_assistant_instructions(),
+                'input' => $input,
+                'tools' => financial_assistant_tools(),
+                'tool_choice' => 'auto',
+                'parallel_tool_calls' => false,
+                'max_output_tokens' => 1200,
+            ]);
+            if ($payload === null) return null;
+
+            $calls = array_values(array_filter($payload['output'] ?? [], fn($item) => ($item['type'] ?? '') === 'function_call'));
+            if (!$calls) {
+                $answer = financial_response_text($payload);
+                return $answer !== '' ? ['kind' => 'answer', 'answer' => $answer] : null;
+            }
+
+            foreach ($payload['output'] ?? [] as $item) $input[] = $item;
+            foreach ($calls as $call) {
+                $args = json_decode((string)($call['arguments'] ?? '{}'), true);
+                $args = is_array($args) ? $args : [];
+
+                if (($call['name'] ?? '') === 'propose_transactions') {
+                    $transactions = [];
+                    foreach (($args['transactions'] ?? []) as $transaction) {
+                        if (!is_array($transaction)) continue;
+                        $normalized = normalize_ai_transaction($transaction, $message, date('Y-m-d'));
+                        if ($normalized !== null) $transactions[] = $normalized;
+                        if (count($transactions) >= 60) break;
+                    }
+                    $recurrenceCount = extract_recurrence_count(normalize_text($message));
+                    if ($recurrenceCount !== null && $transactions) {
+                        $first = $transactions[0];
+                        $baseDescription = preg_replace('/\s+\(\d+\/\d+\)$/', '', (string)$first['description']);
+                        $transactions = [];
+                        for ($index = 0; $index < $recurrenceCount; $index++) {
+                            $occurrence = $first;
+                            $occurrence['description'] = mb_substr("{$baseDescription} (" . ($index + 1) . "/{$recurrenceCount})", 0, 160);
+                            $occurrence['transactionDate'] = add_months_to_iso_date($first['transactionDate'], $index);
+                            $occurrence['dueDate'] = $first['dueDate'] ? add_months_to_iso_date($first['dueDate'], $index) : null;
+                            $transactions[] = $occurrence;
+                        }
+                    }
+                    if (!$transactions) {
+                        return ['kind' => 'answer', 'answer' => 'Não consegui identificar todos os dados do lançamento. Qual é o valor e a data?'];
+                    }
+                    return ['kind' => 'transactions', 'transactions' => $transactions];
+                }
+
+                if (($call['name'] ?? '') === 'query_finances') {
+                    $input[] = [
+                        'type' => 'function_call_output',
+                        'call_id' => (string)$call['call_id'],
+                        'output' => json_encode(analyze_transactions_for_assistant($data['transactions'] ?? [], $args), JSON_UNESCAPED_UNICODE),
+                    ];
+                }
+            }
+        }
+    } catch (Throwable $error) {
+        if (($env['DEBUG_AI'] ?? '') === 'true') error_log('Financial assistant failed: ' . $error->getMessage());
+    }
+    return null;
+}
+
+function openai_response_request(string $baseUrl, string $apiKey, array $body): ?array
+{
+    $curl = curl_init("{$baseUrl}/responses");
+    curl_setopt_array($curl, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json', "Authorization: Bearer {$apiKey}"],
+        CURLOPT_POSTFIELDS => json_encode($body, JSON_UNESCAPED_UNICODE),
+        CURLOPT_TIMEOUT => 25,
+    ]);
+    $raw = curl_exec($curl);
+    $status = (int)curl_getinfo($curl, CURLINFO_HTTP_CODE);
+    curl_close($curl);
+    if ($raw === false || $status < 200 || $status >= 300) return null;
+    $payload = json_decode((string)$raw, true);
+    return is_array($payload) ? $payload : null;
+}
+
+function financial_assistant_instructions(): string
+{
+    $today = date('Y-m-d');
+    return "Você é o assistente financeiro pessoal do Finup e conversa em português do Brasil. "
+        . "Hoje é {$today}, no fuso America/Recife. Interprete datas relativas usando essa referência. "
+        . 'Use propose_transactions quando o usuário quiser registrar receitas, despesas, contas, parcelas ou recorrências. '
+        . 'Nunca invente valor, data, categoria ou recorrência. Se faltar um dado essencial, pergunte de forma curta. '
+        . 'Forma de pagamento e estabelecimento são opcionais: use null e não faça outra pergunta apenas por esses campos. '
+        . 'Compras em mercado, supermercado, mercadinho ou mercearia pertencem à categoria Mercado, mesmo quando o item é alimento. '
+        . 'Em recorrências e parcelamentos, envie uma transação para cada ocorrência, com datas calculadas e descrições curtas. '
+        . "Expressões como por 3 meses, 3 parcelas ou 3x são mensais: calcule a primeira data e avance um mês de calendário por ocorrência, preservando o dia quando possível. "
+        . 'Uma conta futura deve ter dueDate e transactionDate na data informada. Uma compra já feita normalmente não tem dueDate. '
+        . 'Use query_finances para responder qualquer pergunta sobre lançamentos, totais, períodos, categorias, comparações ou contas a pagar. '
+        . 'Para contas a pagar use status scheduled e date_basis due. Para comparar meses, consulte o intervalo completo e agrupe por month. '
+        . 'Não afirme que registrou algo antes de chamar propose_transactions. Os lançamentos propostos ainda serão confirmados pelo usuário. '
+        . 'Responda de forma objetiva, amigável e fácil de ler no celular. Mostre valores em reais e datas em DD/MM/AAAA. '
+        . 'Não exponha JSON, nomes de ferramentas, IDs internos ou detalhes técnicos.';
+}
+
+function financial_assistant_tools(): array
+{
+    $nullableString = ['type' => ['string', 'null']];
+    return [
+        [
+            'type' => 'function', 'name' => 'propose_transactions',
+            'description' => 'Propõe um ou mais lançamentos financeiros para revisão e confirmação do usuário.', 'strict' => true,
+            'parameters' => [
+                'type' => 'object',
+                'properties' => ['transactions' => [
+                    'type' => 'array',
+                    'items' => [
+                        'type' => 'object',
+                        'properties' => [
+                            'kind' => ['type' => 'string', 'enum' => ['income', 'expense']],
+                            'amount' => ['type' => 'number'], 'description' => ['type' => 'string'],
+                            'merchant' => $nullableString,
+                            'paymentMethod' => ['type' => ['string', 'null'], 'enum' => ['Pix', 'Cartao', 'Dinheiro', 'Boleto', null]],
+                            'transactionDate' => ['type' => 'string', 'format' => 'date'],
+                            'dueDate' => ['type' => ['string', 'null'], 'format' => 'date'],
+                            'category' => ['type' => 'string', 'enum' => ['Mercado', 'Alimentação', 'Moradia', 'Transporte', 'Saúde', 'Educação', 'Lazer', 'Renda', 'Outros']],
+                            'confidence' => ['type' => 'number'],
+                        ],
+                        'required' => ['kind', 'amount', 'description', 'merchant', 'paymentMethod', 'transactionDate', 'dueDate', 'category', 'confidence'],
+                        'additionalProperties' => false,
+                    ],
+                ]],
+                'required' => ['transactions'], 'additionalProperties' => false,
+            ],
+        ],
+        [
+            'type' => 'function', 'name' => 'query_finances',
+            'description' => 'Consulta e agrega os lançamentos reais do controle financeiro ativo.', 'strict' => true,
+            'parameters' => [
+                'type' => 'object',
+                'properties' => [
+                    'kind' => ['type' => 'string', 'enum' => ['income', 'expense', 'all']],
+                    'status' => ['type' => 'string', 'enum' => ['confirmed', 'paid', 'scheduled', 'all']],
+                    'date_basis' => ['type' => 'string', 'enum' => ['transaction', 'due', 'auto']],
+                    'start_date' => ['type' => ['string', 'null'], 'format' => 'date'],
+                    'end_date' => ['type' => ['string', 'null'], 'format' => 'date'],
+                    'category' => $nullableString, 'search' => $nullableString,
+                    'group_by' => ['type' => 'string', 'enum' => ['none', 'month', 'category', 'status']],
+                    'limit' => ['type' => 'integer', 'minimum' => 1, 'maximum' => 50],
+                ],
+                'required' => ['kind', 'status', 'date_basis', 'start_date', 'end_date', 'category', 'search', 'group_by', 'limit'],
+                'additionalProperties' => false,
+            ],
+        ],
+    ];
+}
+
+function financial_response_text(array $payload): string
+{
+    $parts = [];
+    foreach ($payload['output'] ?? [] as $item) {
+        if (($item['type'] ?? '') !== 'message') continue;
+        foreach ($item['content'] ?? [] as $content) {
+            if (($content['type'] ?? '') === 'output_text' && isset($content['text'])) $parts[] = (string)$content['text'];
+        }
+    }
+    return trim(implode("\n", $parts));
+}
+
+function analyze_transactions_for_assistant(array $transactions, array $filters): array
+{
+    $kind = in_array($filters['kind'] ?? '', ['income', 'expense', 'all'], true) ? $filters['kind'] : 'all';
+    $status = in_array($filters['status'] ?? '', ['confirmed', 'paid', 'scheduled', 'all'], true) ? $filters['status'] : 'all';
+    $dateBasis = in_array($filters['date_basis'] ?? '', ['transaction', 'due', 'auto'], true) ? $filters['date_basis'] : 'auto';
+    $startDate = is_iso_date((string)($filters['start_date'] ?? '')) ? (string)$filters['start_date'] : null;
+    $endDate = is_iso_date((string)($filters['end_date'] ?? '')) ? (string)$filters['end_date'] : null;
+    $category = normalize_assistant_filter($filters['category'] ?? null);
+    $search = normalize_assistant_filter($filters['search'] ?? null);
+    $groupBy = in_array($filters['group_by'] ?? '', ['none', 'month', 'category', 'status'], true) ? $filters['group_by'] : 'none';
+    $limit = max(1, min(50, (int)($filters['limit'] ?? 20)));
+
+    $filtered = array_values(array_filter($transactions, function ($item) use ($kind, $status, $dateBasis, $startDate, $endDate, $category, $search) {
+        if (!in_array($item['status'] ?? '', ['confirmed', 'paid', 'scheduled'], true)) return false;
+        if ($kind !== 'all' && ($item['kind'] ?? '') !== $kind) return false;
+        if ($status !== 'all' && ($item['status'] ?? '') !== $status) return false;
+        if ($category !== '' && normalize_assistant_filter($item['category'] ?? '') !== $category) return false;
+        if ($search !== '') {
+            $haystack = normalize_assistant_filter(implode(' ', array_filter([$item['description'] ?? '', $item['merchant'] ?? '', $item['category'] ?? ''])));
+            if (!str_contains($haystack, $search)) return false;
+        }
+        $date = assistant_transaction_date($item, $dateBasis);
+        return (!$startDate || $date >= $startDate) && (!$endDate || $date <= $endDate);
+    }));
+    usort($filtered, fn($a, $b) => strcmp(assistant_transaction_date($a, $dateBasis), assistant_transaction_date($b, $dateBasis)));
+
+    $income = round(array_reduce(array_filter($filtered, fn($item) => $item['kind'] === 'income'), fn($sum, $item) => $sum + (float)$item['amount'], 0), 2);
+    $expenses = round(array_reduce(array_filter($filtered, fn($item) => $item['kind'] === 'expense'), fn($sum, $item) => $sum + (float)$item['amount'], 0), 2);
+    $groups = [];
+    if ($groupBy !== 'none') {
+        foreach ($filtered as $item) {
+            $key = $groupBy === 'month' ? substr(assistant_transaction_date($item, $dateBasis), 0, 7) : ($groupBy === 'category' ? (string)$item['category'] : (string)$item['status']);
+            if (!isset($groups[$key])) $groups[$key] = ['key' => $key, 'count' => 0, 'income' => 0.0, 'expenses' => 0.0];
+            $groups[$key]['count']++;
+            $groups[$key][$item['kind'] === 'income' ? 'income' : 'expenses'] += (float)$item['amount'];
+        }
+    }
+    $groups = array_values(array_map(function ($group) {
+        $group['income'] = round($group['income'], 2); $group['expenses'] = round($group['expenses'], 2);
+        $group['result'] = round($group['income'] - $group['expenses'], 2); return $group;
+    }, $groups));
+
+    $items = array_map(fn($item) => [
+        'id' => (string)$item['id'], 'kind' => $item['kind'], 'status' => $item['status'], 'amount' => (float)$item['amount'],
+        'description' => $item['description'], 'merchant' => $item['merchant'] ?: null, 'category' => $item['category'],
+        'transaction_date' => $item['transactionDate'], 'due_date' => $item['dueDate'] ?: null,
+    ], array_slice($filtered, 0, $limit));
+
+    return [
+        'filters' => ['kind' => $kind, 'status' => $status, 'date_basis' => $dateBasis, 'start_date' => $startDate, 'end_date' => $endDate, 'category' => $filters['category'] ?? null, 'search' => $filters['search'] ?? null, 'group_by' => $groupBy],
+        'summary' => ['count' => count($filtered), 'income' => $income, 'expenses' => $expenses, 'result' => round($income - $expenses, 2)],
+        'groups' => $groups, 'items' => $items, 'truncated' => count($filtered) > $limit,
+    ];
+}
+
+function assistant_transaction_date(array $item, string $basis): string
+{
+    if ($basis === 'due' || ($basis === 'auto' && ($item['status'] ?? '') === 'scheduled')) return (string)($item['dueDate'] ?: $item['transactionDate']);
+    return (string)$item['transactionDate'];
+}
+
+function normalize_assistant_filter(mixed $value): string
+{
+    return $value === null ? '' : trim(normalize_text((string)$value));
+}
+
 function parse_financial_message(string $text, array $env = []): array
 {
     $aiParsed = parse_with_openai($text, $env);
@@ -1287,7 +1555,7 @@ function parse_with_openai(string $text, array $env): ?array
     }
 
     $baseUrl = rtrim((string)($env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'), '/');
-    $model = trim((string)($env['OPENAI_MODEL'] ?? 'gpt-4.1-nano')) ?: 'gpt-4.1-nano';
+    $model = trim((string)($env['OPENAI_FALLBACK_MODEL'] ?? $env['OPENAI_MODEL'] ?? 'gpt-4.1-nano')) ?: 'gpt-4.1-nano';
     $today = date('Y-m-d');
 
     $body = [
@@ -1367,7 +1635,7 @@ function parse_image_with_openai(string $path, string $mimeType, string $filenam
     }
 
     $baseUrl = rtrim((string)($env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'), '/');
-    $model = trim((string)($env['OPENAI_MODEL'] ?? 'gpt-4.1-nano')) ?: 'gpt-4.1-nano';
+    $model = trim((string)($env['OPENAI_OCR_MODEL'] ?? $env['OPENAI_MODEL'] ?? 'gpt-4.1-nano')) ?: 'gpt-4.1-nano';
     $today = date('Y-m-d');
     $dataUrl = 'data:' . $mimeType . ';base64,' . base64_encode($content);
 

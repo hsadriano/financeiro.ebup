@@ -24,7 +24,7 @@ export async function parseFinancialImage(imageBuffer, mimeType, filename, now =
 
   try {
     const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
-    const model = process.env.OPENAI_MODEL || "gpt-4.1-nano";
+    const model = process.env.OPENAI_OCR_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-nano";
     const dataUrl = `data:${mimeType};base64,${imageBuffer.toString("base64")}`;
     const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
@@ -136,7 +136,7 @@ async function parseWithOpenAI(text, now) {
 
   try {
     const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
-    const model = process.env.OPENAI_MODEL || "gpt-4.1-nano";
+    const model = process.env.OPENAI_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-nano";
     const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
@@ -255,6 +255,24 @@ function normalizeAiTransaction(transaction, rawText, now) {
     rawText,
     confidence: Math.max(0, Math.min(1, Number(transaction.confidence || 0.8)))
   };
+}
+
+export function normalizeAssistantTransactions(transactions, rawText, now = new Date()) {
+  if (!Array.isArray(transactions)) return [];
+  const normalized = transactions
+    .map((transaction) => normalizeAiTransaction(transaction, rawText, now))
+    .filter(Boolean)
+    .slice(0, 60);
+  const recurrenceCount = extractRecurrenceCount(normalizeText(rawText));
+  if (!recurrenceCount || !normalized.length) return normalized;
+
+  const first = normalized[0];
+  return Array.from({ length: recurrenceCount }, (_, index) => ({
+    ...first,
+    description: `${first.description.replace(/\s+\(\d+\/\d+\)$/, "")} (${index + 1}/${recurrenceCount})`.slice(0, 160),
+    transactionDate: addMonths(first.transactionDate, index),
+    dueDate: first.dueDate ? addMonths(first.dueDate, index) : null
+  }));
 }
 
 function normalizeCategory(category, kind) {

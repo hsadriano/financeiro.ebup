@@ -8,6 +8,7 @@ import { loadEnv, hasDatabaseConfig } from "./config.js";
 import { JsonStorage } from "./storage.js";
 import { MariaDbStorage } from "./mariadb-storage.js";
 import { parseFinancialImage, parseFinancialMessage, summarizeTransaction, summarizeTransactions } from "./parser.js";
+import { runFinancialAssistant } from "./assistant.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -129,22 +130,42 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "POST" && url.pathname === "/api/chat") {
       const body = await readJson(request);
-      await storage.addMessage({ role: "user", content: body.message });
-      const parsed = await parseFinancialMessage(body.message);
+      const message = String(body.message || "").trim();
+      if (!message) return sendJson(response, { error: "Mensagem vazia" }, 400);
+      await storage.addMessage({ role: "user", content: message });
+      const data = await storage.read();
+      const assistantResult = await runFinancialAssistant({
+        message,
+        history: data.messages,
+        transactions: data.transactions
+      });
 
       let assistantContent;
-      if (parsed.intent === "transaction") {
-        const transactions = parsed.transactions || [parsed.transaction];
+      if (assistantResult?.kind === "transactions") {
         const saved = [];
-        for (const transaction of transactions) {
+        for (const transaction of assistantResult.transactions) {
           saved.push(await storage.addTransaction({ ...transaction, status: "pending" }));
         }
         assistantContent =
           saved.length > 1
             ? `${summarizeTransactions(saved)} Confira os dados e confirme para salvar nos relatorios.`
             : `${summarizeTransaction(saved[0])} Confira os dados e confirme para salvar nos relatorios.`;
+      } else if (assistantResult?.kind === "answer") {
+        assistantContent = assistantResult.answer;
       } else {
-        assistantContent = answerAnalyticalQuestion(body.message, await storage.read()) || parsed.answer;
+        const parsed = await parseFinancialMessage(message);
+        if (parsed.intent === "transaction") {
+          const transactions = parsed.transactions || [parsed.transaction];
+          const saved = [];
+          for (const transaction of transactions) {
+            saved.push(await storage.addTransaction({ ...transaction, status: "pending" }));
+          }
+          assistantContent = saved.length > 1
+            ? `${summarizeTransactions(saved)} Confira os dados e confirme para salvar nos relatorios.`
+            : `${summarizeTransaction(saved[0])} Confira os dados e confirme para salvar nos relatorios.`;
+        } else {
+          assistantContent = answerAnalyticalQuestion(message, data) || parsed.answer;
+        }
       }
 
       await storage.addMessage({ role: "assistant", content: assistantContent });

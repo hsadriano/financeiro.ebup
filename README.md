@@ -84,10 +84,12 @@ O app usa um parser local por regras como fallback. Para melhorar o entendimento
 ```text
 OPENAI_API_KEY=sua_chave
 OPENAI_MODEL=gpt-4.1-nano
+OPENAI_CHAT_MODEL=gpt-4.1-mini
+OPENAI_OCR_MODEL=gpt-4.1-nano
 OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
-Quando a chave estiver presente, o chat tenta extrair os dados financeiros pela API. Se a API falhar, o app continua funcionando com o parser local.
+Quando a chave estiver presente, o chat usa a Responses API com memória curta e ferramentas para propor lançamentos e consultar os dados do controle financeiro ativo. O modelo de chat pode ser mais capaz sem aumentar o custo do OCR, que continua usando o modelo configurado em `OPENAI_OCR_MODEL`. Se a API falhar, o app continua funcionando com o parser local.
 
 ## OCR de comprovantes
 
