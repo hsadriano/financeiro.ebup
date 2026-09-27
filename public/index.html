@@ -2,7 +2,7 @@
 <html lang="pt-BR">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#168255" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -11,7 +11,7 @@
     <link rel="icon" type="image/png" href="/finup-favicon.png" />
     <link rel="apple-touch-icon" href="/finup-logo.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/styles.css?v=20260712-4" />
+    <link rel="stylesheet" href="/styles.css?v=20260927-1" />
   </head>
   <body>
     <section id="auth-screen" class="auth-screen">
@@ -132,12 +132,27 @@
           <div id="messages" class="messages" aria-live="polite"></div>
 
           <form id="chat-form" class="composer">
+            <p id="audio-status" class="audio-status" aria-live="polite" hidden></p>
             <input
               id="message-input"
               type="text"
               autocomplete="off"
               placeholder="Ex.: paguei R$ 89,90 no mercado hoje no pix"
             />
+            <button
+              id="audio-button"
+              class="audio-button"
+              type="button"
+              title="Gravar mensagem de voz"
+              aria-label="Gravar mensagem de voz"
+            >
+              <svg class="microphone-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Zm-5-3a1 1 0 0 1 2 0 3 3 0 1 0 6 0 1 1 0 1 1 2 0 5 5 0 0 1-5 4.9V19h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-3.1A5 5 0 0 1 7 11Z" />
+              </svg>
+              <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 7h10v10H7z" />
+              </svg>
+            </button>
             <button type="submit" title="Enviar mensagem">Enviar</button>
           </form>
         </section>
@@ -220,6 +235,6 @@
       <option value="Outros"></option>
     </datalist>
 
-    <script src="/app.js?v=20260712-4" type="module"></script>
+    <script src="/app.js?v=20260927-1" type="module"></script>
   </body>
 </html>

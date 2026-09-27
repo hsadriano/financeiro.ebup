@@ -8,6 +8,12 @@ const state = {
     category: ""
   },
   allTransactions: [],
+  audioRecorder: null,
+  audioStream: null,
+  audioChunks: [],
+  audioTimer: null,
+  audioStartedAt: null,
+  audioBusy: false,
   session: null,
   authMode: new URLSearchParams(window.location.search).has("reset") ? "reset" : "login",
   resetToken: new URLSearchParams(window.location.search).get("reset")
@@ -54,6 +60,9 @@ const elements = {
   clearLedgerFilters: document.querySelector("#clear-ledger-filters"),
   form: document.querySelector("#chat-form"),
   input: document.querySelector("#message-input"),
+  sendButton: document.querySelector('#chat-form button[type="submit"]'),
+  audioButton: document.querySelector("#audio-button"),
+  audioStatus: document.querySelector("#audio-status"),
   fileInput: document.querySelector("#file-input"),
   panels: document.querySelectorAll("[data-panel]"),
   tabs: document.querySelectorAll("[data-tab]"),
@@ -143,6 +152,7 @@ elements.backLoginButton.addEventListener("click", () => {
 });
 
 elements.logoutButton.addEventListener("click", async () => {
+  cancelAudioRecording();
   await fetch("/api/auth/logout", { method: "POST" });
   state.session = null;
   showAuth();
@@ -171,11 +181,21 @@ elements.shareControlButton.addEventListener("click", async () => {
 
 elements.form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (state.audioRecorder || state.audioBusy) return;
   const message = elements.input.value.trim();
   if (!message) return;
   elements.input.value = "";
   await postJson("/api/chat", { message });
   await loadState();
+});
+
+elements.audioButton.addEventListener("click", async () => {
+  if (state.audioBusy) return;
+  if (state.audioRecorder) {
+    stopAudioRecording();
+    return;
+  }
+  await startAudioRecording();
 });
 
 elements.fileInput.addEventListener("change", async () => {
@@ -193,6 +213,133 @@ elements.fileInput.addEventListener("change", async () => {
   }
   await loadState();
 });
+
+async function startAudioRecording() {
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    renderLocalError("Este navegador não oferece gravação de áudio. Tente atualizar o navegador ou usar outro aparelho.");
+    return;
+  }
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = preferredAudioMimeType();
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+
+    state.audioStream = stream;
+    state.audioRecorder = recorder;
+    state.audioChunks = [];
+    state.audioStartedAt = Date.now();
+
+    recorder.addEventListener("dataavailable", (event) => {
+      if (event.data.size > 0) state.audioChunks.push(event.data);
+    });
+    recorder.addEventListener("stop", handleAudioRecordingStopped, { once: true });
+    recorder.start(250);
+    setAudioUi({ recording: true, status: "Gravando 00:00. Toque novamente para enviar." });
+    state.audioTimer = window.setInterval(() => {
+      const elapsed = Math.floor((Date.now() - state.audioStartedAt) / 1000);
+      if (elapsed >= 60) {
+        stopAudioRecording();
+        return;
+      }
+      setAudioUi({ recording: true, status: `Gravando ${formatDuration(elapsed)}. Toque novamente para enviar.` });
+    }, 500);
+  } catch (error) {
+    stream?.getTracks().forEach((track) => track.stop());
+    releaseAudioStream();
+    const denied = error?.name === "NotAllowedError" || error?.name === "PermissionDeniedError";
+    renderLocalError(denied
+      ? "Não consegui acessar o microfone. Autorize o uso do microfone nas configurações do navegador."
+      : "Não consegui iniciar a gravação de áudio neste aparelho.");
+  }
+}
+
+function stopAudioRecording() {
+  const recorder = state.audioRecorder;
+  if (!recorder || recorder.state === "inactive") return;
+  setAudioUi({ recording: false, busy: true, status: "Preparando áudio..." });
+  recorder.stop();
+}
+
+async function handleAudioRecordingStopped() {
+  const recorder = state.audioRecorder;
+  const mimeType = recorder?.mimeType || state.audioChunks[0]?.type || "audio/webm";
+  const audio = new Blob(state.audioChunks, { type: mimeType });
+  state.audioRecorder = null;
+  state.audioChunks = [];
+  releaseAudioStream();
+
+  if (!audio.size) {
+    setAudioUi({ recording: false, busy: false, status: "" });
+    renderLocalError("A gravação ficou vazia. Tente falar mais perto do microfone.");
+    return;
+  }
+
+  setAudioUi({ recording: false, busy: true, status: "Transcrevendo mensagem de voz..." });
+  const body = new FormData();
+  body.append("audio", audio, `mensagem-${Date.now()}.${audioExtension(mimeType)}`);
+
+  try {
+    const response = await fetch("/api/audio", { method: "POST", body });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: "Não consegui transcrever o áudio." }));
+      throw new Error(error.error || error.detail || "Não consegui transcrever o áudio.");
+    }
+    await loadState();
+  } catch (error) {
+    renderLocalError(error.message || "Não consegui enviar a mensagem de voz.");
+  } finally {
+    setAudioUi({ recording: false, busy: false, status: "" });
+  }
+}
+
+function cancelAudioRecording() {
+  if (state.audioRecorder) {
+    state.audioRecorder.removeEventListener("stop", handleAudioRecordingStopped);
+    if (state.audioRecorder.state !== "inactive") state.audioRecorder.stop();
+    state.audioRecorder = null;
+  }
+  state.audioChunks = [];
+  releaseAudioStream();
+  setAudioUi({ recording: false, busy: false, status: "" });
+}
+
+function releaseAudioStream() {
+  if (state.audioTimer) window.clearInterval(state.audioTimer);
+  state.audioTimer = null;
+  state.audioStartedAt = null;
+  state.audioStream?.getTracks().forEach((track) => track.stop());
+  state.audioStream = null;
+}
+
+function setAudioUi({ recording = false, busy = false, status = "" }) {
+  state.audioBusy = busy;
+  elements.audioButton.classList.toggle("recording", recording);
+  elements.audioButton.disabled = busy;
+  elements.audioButton.title = recording ? "Parar e enviar mensagem de voz" : "Gravar mensagem de voz";
+  elements.audioButton.setAttribute("aria-label", elements.audioButton.title);
+  elements.input.disabled = recording || busy;
+  elements.sendButton.disabled = recording || busy;
+  elements.audioStatus.textContent = status;
+  elements.audioStatus.hidden = !status;
+}
+
+function preferredAudioMimeType() {
+  return ["audio/webm;codecs=opus", "audio/mp4", "audio/webm", "audio/ogg;codecs=opus"]
+    .find((type) => MediaRecorder.isTypeSupported(type)) || "";
+}
+
+function audioExtension(mimeType) {
+  if (mimeType.includes("mp4")) return "m4a";
+  if (mimeType.includes("ogg")) return "ogg";
+  return "webm";
+}
+
+function formatDuration(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}
 
 init();
 

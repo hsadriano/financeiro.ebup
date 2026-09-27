@@ -108,41 +108,26 @@ try {
         if ($message === '') {
             respond(['error' => 'Mensagem vazia'], 400);
         }
+        respond(process_financial_message($pdo, $userId, $controlId, $message, $env));
+    }
 
-        add_message($pdo, $userId, $controlId, 'user', $message);
-        $data = read_data($pdo, $userId, $controlId);
-        $assistantResult = run_financial_assistant($message, $data, $env);
-
-        if (($assistantResult['kind'] ?? '') === 'transactions') {
-            $saved = [];
-            foreach ($assistantResult['transactions'] as $transaction) {
-                $transaction['status'] = 'pending';
-                $saved[] = add_transaction($pdo, $userId, $controlId, $transaction);
-            }
-            $assistant = count($saved) > 1
-                ? summarize_transactions($saved) . ' Confira os dados e confirme para salvar nos relatorios.'
-                : summarize_transaction($saved[0]) . ' Confira os dados e confirme para salvar nos relatorios.';
-        } elseif (($assistantResult['kind'] ?? '') === 'answer') {
-            $assistant = (string)$assistantResult['answer'];
-        } else {
-            $parsed = parse_financial_message($message, $env);
-            if ($parsed['intent'] === 'transaction') {
-                $transactions = $parsed['transactions'] ?? [$parsed['transaction']];
-                $saved = [];
-                foreach ($transactions as $transaction) {
-                    $transaction['status'] = 'pending';
-                    $saved[] = add_transaction($pdo, $userId, $controlId, $transaction);
-                }
-                $assistant = count($saved) > 1
-                    ? summarize_transactions($saved) . ' Confira os dados e confirme para salvar nos relatorios.'
-                    : summarize_transaction($saved[0]) . ' Confira os dados e confirme para salvar nos relatorios.';
-            } else {
-                $assistant = answer_analytical_question($message, $data) ?: $parsed['answer'];
-            }
+    if ($method === 'POST' && $path === 'audio') {
+        if (!isset($_FILES['audio']) || (int)($_FILES['audio']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            respond(['error' => 'Nenhum áudio válido foi enviado.'], 400);
         }
-
-        add_message($pdo, $userId, $controlId, 'assistant', $assistant);
-        respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
+        $file = $_FILES['audio'];
+        if ((int)($file['size'] ?? 0) > 10 * 1024 * 1024) {
+            respond(['error' => 'O áudio é muito grande. Grave uma mensagem mais curta.'], 413);
+        }
+        $mimeType = (string)($file['type'] ?? '');
+        if (!str_starts_with($mimeType, 'audio/')) {
+            respond(['error' => 'O arquivo enviado não é um áudio válido.'], 400);
+        }
+        $message = transcribe_audio_with_openai((string)$file['tmp_name'], $mimeType, basename((string)$file['name']), $env);
+        if ($message === '') {
+            respond(['error' => 'Não consegui identificar fala nesse áudio.'], 422);
+        }
+        respond(process_financial_message($pdo, $userId, $controlId, $message, $env));
     }
 
     if ($method === 'POST' && preg_match('#^transactions/([^/]+)/(confirm|dismiss|remove|update)$#', $path, $matches)) {
@@ -1249,6 +1234,78 @@ function build_state(array $data, array $sessionPayload): array
             'monthlySeries' => build_monthly_series($confirmed),
         ],
     ];
+}
+
+function process_financial_message(PDO $pdo, int $userId, int $controlId, string $message, array $env): array
+{
+    add_message($pdo, $userId, $controlId, 'user', $message);
+    $data = read_data($pdo, $userId, $controlId);
+    $assistantResult = run_financial_assistant($message, $data, $env);
+
+    if (($assistantResult['kind'] ?? '') === 'transactions') {
+        $saved = [];
+        foreach ($assistantResult['transactions'] as $transaction) {
+            $transaction['status'] = 'pending';
+            $saved[] = add_transaction($pdo, $userId, $controlId, $transaction);
+        }
+        $assistant = count($saved) > 1
+            ? summarize_transactions($saved) . ' Confira os dados e confirme para salvar nos relatorios.'
+            : summarize_transaction($saved[0]) . ' Confira os dados e confirme para salvar nos relatorios.';
+    } elseif (($assistantResult['kind'] ?? '') === 'answer') {
+        $assistant = (string)$assistantResult['answer'];
+    } else {
+        $parsed = parse_financial_message($message, $env);
+        if ($parsed['intent'] === 'transaction') {
+            $transactions = $parsed['transactions'] ?? [$parsed['transaction']];
+            $saved = [];
+            foreach ($transactions as $transaction) {
+                $transaction['status'] = 'pending';
+                $saved[] = add_transaction($pdo, $userId, $controlId, $transaction);
+            }
+            $assistant = count($saved) > 1
+                ? summarize_transactions($saved) . ' Confira os dados e confirme para salvar nos relatorios.'
+                : summarize_transaction($saved[0]) . ' Confira os dados e confirme para salvar nos relatorios.';
+        } else {
+            $assistant = answer_analytical_question($message, $data) ?: $parsed['answer'];
+        }
+    }
+
+    add_message($pdo, $userId, $controlId, 'assistant', $assistant);
+    return build_state(
+        read_data($pdo, $userId, $controlId),
+        session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])
+    );
+}
+
+function transcribe_audio_with_openai(string $path, string $mimeType, string $filename, array $env): string
+{
+    $apiKey = trim((string)($env['OPENAI_API_KEY'] ?? ''));
+    if ($apiKey === '' || !function_exists('curl_init')) {
+        throw new RuntimeException('A transcrição de áudio ainda não está configurada.');
+    }
+
+    $baseUrl = rtrim((string)($env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'), '/');
+    $model = trim((string)($env['OPENAI_TRANSCRIBE_MODEL'] ?? 'gpt-4o-mini-transcribe')) ?: 'gpt-4o-mini-transcribe';
+    $curl = curl_init("{$baseUrl}/audio/transcriptions");
+    curl_setopt_array($curl, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => ["Authorization: Bearer {$apiKey}"],
+        CURLOPT_POSTFIELDS => [
+            'file' => new CURLFile($path, $mimeType, $filename),
+            'model' => $model,
+            'prompt' => 'Português do Brasil. Mensagem sobre finanças pessoais, compras, contas, vencimentos, parcelas, Pix e valores em reais.',
+        ],
+        CURLOPT_TIMEOUT => 45,
+    ]);
+    $raw = curl_exec($curl);
+    $status = (int)curl_getinfo($curl, CURLINFO_HTTP_CODE);
+    curl_close($curl);
+    if ($raw === false || $status < 200 || $status >= 300) {
+        throw new RuntimeException('Não consegui transcrever o áudio agora.');
+    }
+    $payload = json_decode((string)$raw, true);
+    return trim((string)($payload['text'] ?? ''));
 }
 
 function run_financial_assistant(string $message, array $data, array $env): ?array

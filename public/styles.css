@@ -443,11 +443,18 @@ h2 {
 
 .composer {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) 44px auto;
   gap: 10px;
   padding: 14px;
   border-top: 1px solid var(--line);
   background: #fbfcfb;
+}
+
+.audio-status {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
 .composer input {
@@ -467,6 +474,53 @@ h2 {
   background: var(--green);
   font-weight: 800;
   cursor: pointer;
+}
+
+.composer button:disabled {
+  opacity: 0.62;
+  cursor: wait;
+}
+
+.composer .audio-button {
+  display: grid;
+  width: 44px;
+  min-height: 44px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--line);
+  color: var(--blue);
+  background: #fff;
+}
+
+.audio-button svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+}
+
+.audio-button .stop-icon {
+  display: none;
+}
+
+.audio-button.recording {
+  color: #fff;
+  background: var(--red);
+  border-color: var(--red);
+  animation: recording-pulse 1.35s ease-in-out infinite;
+}
+
+.audio-button.recording .microphone-icon {
+  display: none;
+}
+
+.audio-button.recording .stop-icon {
+  display: block;
+}
+
+@keyframes recording-pulse {
+  50% {
+    box-shadow: 0 0 0 5px rgba(182, 66, 66, 0.16);
+  }
 }
 
 .category-list,
@@ -951,8 +1005,20 @@ h2 {
 
 @media (max-width: 760px) {
   .app-shell {
+    height: 100vh;
+    height: 100dvh;
+    min-height: 100svh;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    overflow: hidden;
     padding: 8px;
     padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  }
+
+  .workspace {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .brand-mark {
@@ -1001,12 +1067,29 @@ h2 {
   .sidebar,
   .ledger,
   .files-panel {
-    min-height: calc(100dvh - 208px);
-    max-height: calc(100dvh - 208px);
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    max-height: none;
+  }
+
+  .sidebar,
+  .ledger,
+  .files-panel {
+    padding-bottom: calc(20px + env(safe-area-inset-bottom));
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
   }
 
   .messages {
-    max-height: calc(100dvh - 378px);
+    min-height: 0;
+    max-height: none;
+    overscroll-behavior-y: contain;
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
   }
 
   .topbar {
@@ -1034,10 +1117,6 @@ h2 {
   .chat-pending-actions,
   .chat-bulk-actions {
     justify-content: flex-start;
-  }
-
-  .composer {
-    grid-template-columns: 1fr;
   }
 
   .composer button {
@@ -1072,6 +1151,7 @@ h2 {
   .transaction-list,
   .pending-list,
   .category-list {
-    max-height: calc(100dvh - 248px);
+    max-height: none;
+    overflow: visible;
   }
 }

@@ -132,44 +132,15 @@ const server = createServer(async (request, response) => {
       const body = await readJson(request);
       const message = String(body.message || "").trim();
       if (!message) return sendJson(response, { error: "Mensagem vazia" }, 400);
-      await storage.addMessage({ role: "user", content: message });
-      const data = await storage.read();
-      const assistantResult = await runFinancialAssistant({
-        message,
-        history: data.messages,
-        transactions: data.transactions
-      });
+      return sendJson(response, await processFinancialMessage(message));
+    }
 
-      let assistantContent;
-      if (assistantResult?.kind === "transactions") {
-        const saved = [];
-        for (const transaction of assistantResult.transactions) {
-          saved.push(await storage.addTransaction({ ...transaction, status: "pending" }));
-        }
-        assistantContent =
-          saved.length > 1
-            ? `${summarizeTransactions(saved)} Confira os dados e confirme para salvar nos relatorios.`
-            : `${summarizeTransaction(saved[0])} Confira os dados e confirme para salvar nos relatorios.`;
-      } else if (assistantResult?.kind === "answer") {
-        assistantContent = assistantResult.answer;
-      } else {
-        const parsed = await parseFinancialMessage(message);
-        if (parsed.intent === "transaction") {
-          const transactions = parsed.transactions || [parsed.transaction];
-          const saved = [];
-          for (const transaction of transactions) {
-            saved.push(await storage.addTransaction({ ...transaction, status: "pending" }));
-          }
-          assistantContent = saved.length > 1
-            ? `${summarizeTransactions(saved)} Confira os dados e confirme para salvar nos relatorios.`
-            : `${summarizeTransaction(saved[0])} Confira os dados e confirme para salvar nos relatorios.`;
-        } else {
-          assistantContent = answerAnalyticalQuestion(message, data) || parsed.answer;
-        }
-      }
-
-      await storage.addMessage({ role: "assistant", content: assistantContent });
-      return sendJson(response, buildState(await storage.read()));
+    if (request.method === "POST" && url.pathname === "/api/audio") {
+      const file = await readMultipartFile(request, { fieldName: "audio", maxBytes: 10 * 1024 * 1024 });
+      if (!file.mimeType.startsWith("audio/")) return sendJson(response, { error: "O arquivo enviado não é um áudio válido." }, 400);
+      const message = await transcribeAudio(file);
+      if (!message) return sendJson(response, { error: "Não consegui identificar fala nesse áudio." }, 422);
+      return sendJson(response, await processFinancialMessage(message));
     }
 
     if (request.method === "POST" && url.pathname.startsWith("/api/transactions/")) {
@@ -262,6 +233,74 @@ async function createStorage() {
   await database.init();
   console.log(`Using MariaDB database "${process.env.DB_NAME}" at ${process.env.DB_HOST}:${process.env.DB_PORT || 3306}.`);
   return database;
+}
+
+async function processFinancialMessage(message) {
+  await storage.addMessage({ role: "user", content: message });
+  const data = await storage.read();
+  const assistantResult = await runFinancialAssistant({
+    message,
+    history: data.messages,
+    transactions: data.transactions
+  });
+
+  let assistantContent;
+  if (assistantResult?.kind === "transactions") {
+    const saved = [];
+    for (const transaction of assistantResult.transactions) {
+      saved.push(await storage.addTransaction({ ...transaction, status: "pending" }));
+    }
+    assistantContent = saved.length > 1
+      ? `${summarizeTransactions(saved)} Confira os dados e confirme para salvar nos relatorios.`
+      : `${summarizeTransaction(saved[0])} Confira os dados e confirme para salvar nos relatorios.`;
+  } else if (assistantResult?.kind === "answer") {
+    assistantContent = assistantResult.answer;
+  } else {
+    const parsed = await parseFinancialMessage(message);
+    if (parsed.intent === "transaction") {
+      const transactions = parsed.transactions || [parsed.transaction];
+      const saved = [];
+      for (const transaction of transactions) {
+        saved.push(await storage.addTransaction({ ...transaction, status: "pending" }));
+      }
+      assistantContent = saved.length > 1
+        ? `${summarizeTransactions(saved)} Confira os dados e confirme para salvar nos relatorios.`
+        : `${summarizeTransaction(saved[0])} Confira os dados e confirme para salvar nos relatorios.`;
+    } else {
+      assistantContent = answerAnalyticalQuestion(message, data) || parsed.answer;
+    }
+  }
+
+  await storage.addMessage({ role: "assistant", content: assistantContent });
+  return buildState(await storage.read());
+}
+
+async function transcribeAudio(file) {
+  if (!process.env.OPENAI_API_KEY) {
+    const error = new Error("A transcrição de áudio ainda não está configurada.");
+    error.status = 503;
+    throw error;
+  }
+
+  const baseUrl = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
+  const body = new FormData();
+  body.append("file", new Blob([file.buffer], { type: file.mimeType }), file.originalName);
+  body.append("model", process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe");
+  body.append("prompt", "Português do Brasil. Mensagem sobre finanças pessoais, compras, contas, vencimentos, parcelas, Pix e valores em reais.");
+
+  const response = await fetch(`${baseUrl}/audio/transcriptions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    body
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    const error = new Error(`Não consegui transcrever o áudio. ${detail.slice(0, 180)}`.trim());
+    error.status = 502;
+    throw error;
+  }
+  const payload = await response.json();
+  return String(payload.text || "").trim();
 }
 
 function buildState(data) {
@@ -518,21 +557,8 @@ async function readJson(request) {
 }
 
 async function saveUpload(request, controlId) {
-  const contentType = request.headers["content-type"] || "";
-  const boundary = contentType.match(/boundary=(.+)$/)?.[1];
-  if (!boundary) throw new Error("Upload sem boundary multipart.");
-
-  const chunks = [];
-  for await (const chunk of request) chunks.push(chunk);
-  const buffer = Buffer.concat(chunks);
-  const parts = buffer.toString("binary").split(`--${boundary}`);
-  const filePart = parts.find((part) => part.includes("filename="));
-  if (!filePart) throw new Error("Nenhum arquivo enviado.");
-
-  const [rawHeaders, rawContent] = filePart.split("\r\n\r\n");
-  const originalName = rawHeaders.match(/filename="([^"]+)"/)?.[1] || "arquivo";
-  const mimeType = rawHeaders.match(/Content-Type:\s*([^\r\n]+)/i)?.[1] || "application/octet-stream";
-  const content = Buffer.from(rawContent.replace(/\r\n--$/, "").replace(/\r\n$/, ""), "binary");
+  const file = await readMultipartFile(request, { fieldName: "file", maxBytes: 20 * 1024 * 1024 });
+  const { originalName, mimeType, buffer: content } = file;
   const extension = path.extname(originalName).replace(/[^a-zA-Z0-9.]/g, "") || ".bin";
   const objectName = `controls/${controlId}/documents/${new Date().toISOString().slice(0, 10)}/${Date.now()}-${crypto.randomUUID()}${extension}`;
   const localPath = path.join(uploadDir, objectName);
@@ -542,6 +568,40 @@ async function saveUpload(request, controlId) {
 
   const storedName = await uploadToGoogleCloudStorage(content, objectName, mimeType);
   return { originalName, storedName, mimeType, filePath: localPath, buffer: content };
+}
+
+async function readMultipartFile(request, { fieldName, maxBytes }) {
+  const contentType = request.headers["content-type"] || "";
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  const boundary = boundaryMatch?.[1] || boundaryMatch?.[2];
+  if (!boundary) throw new Error("Upload sem boundary multipart.");
+
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxBytes) {
+      const error = new Error("O arquivo enviado é muito grande.");
+      error.status = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  const buffer = Buffer.concat(chunks);
+  const disposition = Buffer.from(`Content-Disposition: form-data; name="${fieldName}"`);
+  const dispositionStart = buffer.indexOf(disposition);
+  if (dispositionStart === -1) throw new Error("Nenhum arquivo enviado.");
+  const headersEnd = buffer.indexOf(Buffer.from("\r\n\r\n"), dispositionStart);
+  if (headersEnd === -1) throw new Error("Upload multipart inválido.");
+  const contentStart = headersEnd + 4;
+  const contentEnd = buffer.indexOf(Buffer.from(`\r\n--${boundary}`), contentStart);
+  if (contentEnd === -1) throw new Error("Upload multipart incompleto.");
+
+  const rawHeaders = buffer.subarray(dispositionStart, headersEnd).toString("utf8");
+  const originalName = path.basename(rawHeaders.match(/filename="([^"]+)"/)?.[1] || "arquivo");
+  const mimeType = rawHeaders.match(/Content-Type:\s*([^\r\n]+)/i)?.[1] || "application/octet-stream";
+  const content = buffer.subarray(contentStart, contentEnd);
+  return { originalName, mimeType, buffer: content };
 }
 
 async function uploadToGoogleCloudStorage(content, objectName, mimeType) {

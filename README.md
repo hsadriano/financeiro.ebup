@@ -34,6 +34,7 @@ Em hospedagem PHP/Apache, como Hostinger compartilhada, o projeto tambem roda di
 ## O que já existe
 
 - Chat para registrar despesas, receitas e contas a pagar por texto.
+- Mensagens de voz no chat, transcritas antes da interpretação financeira.
 - Upload de imagens/PDFs/comprovantes para iniciar o fluxo de conferência.
 - OCR de imagens com OpenAI quando `OPENAI_API_KEY` estiver configurada.
 - Dashboard mensal com receitas, despesas, resultado, contas a pagar e categorias.
@@ -86,10 +87,13 @@ OPENAI_API_KEY=sua_chave
 OPENAI_MODEL=gpt-4.1-nano
 OPENAI_CHAT_MODEL=gpt-4.1-mini
 OPENAI_OCR_MODEL=gpt-4.1-nano
+OPENAI_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe
 OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
 Quando a chave estiver presente, o chat usa a Responses API com memória curta e ferramentas para propor lançamentos e consultar os dados do controle financeiro ativo. O modelo de chat pode ser mais capaz sem aumentar o custo do OCR, que continua usando o modelo configurado em `OPENAI_OCR_MODEL`. Se a API falhar, o app continua funcionando com o parser local.
+
+As mensagens de voz são limitadas a 60 segundos. O áudio é enviado somente para transcrição e não é armazenado no banco nem no bucket; o histórico guarda apenas o texto transcrito.
 
 ## OCR de comprovantes
 
