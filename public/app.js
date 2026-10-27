@@ -8,6 +8,7 @@ const state = {
     category: ""
   },
   allTransactions: [],
+  wallets: [],
   audioRecorder: null,
   audioStream: null,
   audioChunks: [],
@@ -67,7 +68,17 @@ const elements = {
   panels: document.querySelectorAll("[data-panel]"),
   tabs: document.querySelectorAll("[data-tab]"),
   pendingBadge: document.querySelector("#pending-badge"),
-  filesBadge: document.querySelector("#files-badge")
+  filesBadge: document.querySelector("#files-badge"),
+  settingsFeedback: document.querySelector("#settings-feedback"),
+  profileForm: document.querySelector("#profile-form"),
+  profileName: document.querySelector("#profile-name"),
+  profileEmail: document.querySelector("#profile-email"),
+  walletList: document.querySelector("#wallet-list"),
+  walletForm: document.querySelector("#wallet-form"),
+  controlSettingsForm: document.querySelector("#control-settings-form"),
+  controlSettingsName: document.querySelector("#control-settings-name"),
+  shareSettingsForm: document.querySelector("#share-settings-form"),
+  passwordForm: document.querySelector("#password-form")
 };
 
 elements.tabs.forEach((tab) => {
@@ -177,6 +188,45 @@ elements.shareControlButton.addEventListener("click", async () => {
   if (!email?.trim()) return;
   await postJson("/api/controls/share", { email: email.trim() });
   await loadSession();
+});
+
+elements.profileForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const response = await postJson("/api/settings/profile", Object.fromEntries(new FormData(elements.profileForm)));
+  if (!(await handleSettingsResponse(response, "Perfil atualizado."))) return;
+  state.session = await response.json();
+  renderSession();
+});
+
+elements.controlSettingsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const response = await postJson("/api/settings/control", Object.fromEntries(new FormData(elements.controlSettingsForm)));
+  if (!(await handleSettingsResponse(response, "Nome atualizado."))) return;
+  state.session = await response.json();
+  renderSession();
+});
+
+elements.shareSettingsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const response = await postJson("/api/controls/share", Object.fromEntries(new FormData(elements.shareSettingsForm)));
+  if (!(await handleSettingsResponse(response, "Acesso concedido."))) return;
+  elements.shareSettingsForm.reset();
+});
+
+elements.passwordForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const response = await postJson("/api/settings/password", Object.fromEntries(new FormData(elements.passwordForm)));
+  if (!(await handleSettingsResponse(response, "Senha alterada."))) return;
+  elements.passwordForm.reset();
+});
+
+elements.walletForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const response = await postJson("/api/settings/wallets", Object.fromEntries(new FormData(elements.walletForm)));
+  if (!(await handleSettingsResponse(response, "Carteira adicionada."))) return;
+  elements.walletForm.reset();
+  elements.walletForm.elements.openingBalance.value = "0,00";
+  await loadState();
 });
 
 elements.form.addEventListener("submit", async (event) => {
@@ -428,6 +478,26 @@ function renderSession() {
   if (state.session?.activeControlId) {
     elements.controlSelect.value = state.session.activeControlId;
   }
+  elements.profileName.value = state.session?.user?.name || "";
+  elements.profileEmail.value = state.session?.user?.email || "";
+  const activeControl = controls.find((control) => String(control.id) === String(state.session?.activeControlId));
+  elements.controlSettingsName.value = activeControl?.name || "";
+}
+
+async function handleSettingsResponse(response, successMessage) {
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: "Não foi possível salvar esta alteração." }));
+    showSettingsFeedback(error.error || "Não foi possível salvar esta alteração.", true);
+    return false;
+  }
+  showSettingsFeedback(successMessage, false);
+  return true;
+}
+
+function showSettingsFeedback(message, isError) {
+  elements.settingsFeedback.textContent = message;
+  elements.settingsFeedback.classList.toggle("error", isError);
+  elements.settingsFeedback.hidden = false;
 }
 
 function setAuthMode(mode) {
@@ -527,8 +597,13 @@ function showAuthHelp(message) {
 }
 
 function render(data) {
+  if (data.session?.user) {
+    state.session = data.session;
+    renderSession();
+  }
   state.lastSummary = data.summary;
   state.allTransactions = data.transactions || [];
+  state.wallets = data.wallets || [];
   elements.income.textContent = money(data.summary.income);
   elements.expenses.textContent = money(data.summary.expenses);
   elements.result.textContent = money(data.summary.result);
@@ -538,6 +613,7 @@ function render(data) {
   renderCategories(data.summary);
   renderInsights(data.summary);
   renderDocuments(data.documents);
+  renderWallets(state.wallets);
   renderPendingTransactions(data.pendingTransactions || []);
   renderTransactions(state.allTransactions);
   updateBadges(data);
@@ -833,6 +909,45 @@ function renderDocuments(documents) {
     .join("");
 }
 
+function renderWallets(wallets) {
+  if (!wallets.length) {
+    elements.walletList.innerHTML = `<p class="empty">Nenhuma carteira cadastrada.</p>`;
+    return;
+  }
+  elements.walletList.innerHTML = wallets.map((wallet) => `
+    <form class="wallet-editor" data-wallet-id="${escapeAttribute(wallet.id)}">
+      <label><span>Nome</span><input name="name" value="${escapeAttribute(wallet.name)}" required /><small class="wallet-balance">Saldo calculado: ${money(wallet.balance)}</small></label>
+      <label><span>Tipo</span><select name="type">${walletTypeOptions(wallet.type)}</select></label>
+      <label><span>Saldo inicial</span><input name="openingBalance" inputmode="decimal" value="${Number(wallet.openingBalance || 0).toFixed(2).replace(".", ",")}" /></label>
+      <div class="wallet-actions"><button type="submit">Salvar</button><button class="wallet-remove" type="button">Remover</button></div>
+    </form>
+  `).join("");
+
+  elements.walletList.querySelectorAll(".wallet-editor").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const response = await postJson(`/api/settings/wallets/${encodeURIComponent(form.dataset.walletId)}/update`, Object.fromEntries(new FormData(form)));
+      if (!(await handleSettingsResponse(response, "Carteira atualizada."))) return;
+      await loadState();
+    });
+    form.querySelector(".wallet-remove").addEventListener("click", async () => {
+      if (!confirm(`Remover a carteira ${form.elements.name.value}?`)) return;
+      const response = await postJson(`/api/settings/wallets/${encodeURIComponent(form.dataset.walletId)}/remove`, {});
+      if (!(await handleSettingsResponse(response, "Carteira removida."))) return;
+      await loadState();
+    });
+  });
+}
+
+function walletTypeOptions(selected) {
+  const types = { checking: "Conta corrente", savings: "Poupança", cash: "Dinheiro", credit_card: "Cartão de crédito", investment: "Investimento" };
+  return Object.entries(types).map(([value, label]) => `<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function walletOptions(selected) {
+  return [`<option value="">Sem carteira</option>`, ...state.wallets.map((wallet) => `<option value="${escapeAttribute(wallet.id)}" ${String(selected || "") === String(wallet.id) ? "selected" : ""}>${escapeHtml(wallet.name)}</option>`)].join("");
+}
+
 function renderTransactions(transactions) {
   syncLedgerFilterControls();
   const filteredTransactions = filterTransactions(transactions);
@@ -852,6 +967,7 @@ function renderTransactions(transactions) {
             <div class="transaction-meta">
               ${escapeHtml(transaction.category)} · ${formatDate(transaction.transactionDate)}
               ${transaction.dueDate ? ` · vence ${formatDate(transaction.dueDate)}` : ""}
+              ${transaction.accountName ? ` · ${escapeHtml(transaction.accountName)}` : ""}
             </div>
           </div>
           <div class="transaction-meta">
@@ -966,6 +1082,10 @@ function renderPendingTransactions(transactions) {
               </label>
             </div>
             <div class="review-grid optional-grid">
+              <label>
+                <span>Carteira</span>
+                <select name="accountId">${walletOptions(transaction.accountId)}</select>
+              </label>
               <label>
                 <span>Forma</span>
                 <input name="paymentMethod" value="${escapeAttribute(transaction.paymentMethod || "")}" placeholder="Pix, cartão..." />

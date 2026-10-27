@@ -98,6 +98,40 @@ try {
         respond(session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId]));
     }
 
+    if ($method === 'POST' && $path === 'settings/profile') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        update_profile($pdo, $userId, $body);
+        respond(session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId]));
+    }
+
+    if ($method === 'POST' && $path === 'settings/password') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        change_password($pdo, $userId, $body);
+        respond(['ok' => true]);
+    }
+
+    if ($method === 'POST' && $path === 'settings/control') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        rename_control($pdo, $userId, $controlId, $body);
+        respond(session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId]));
+    }
+
+    if ($method === 'POST' && $path === 'settings/wallets') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        create_wallet($pdo, $userId, $controlId, $body);
+        respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
+    }
+
+    if ($method === 'POST' && preg_match('#^settings/wallets/([^/]+)/(update|remove)$#', $path, $walletMatch)) {
+        if ($walletMatch[2] === 'update') {
+            $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+            update_wallet($pdo, $controlId, $walletMatch[1], $body);
+        } else {
+            remove_wallet($pdo, $controlId, $walletMatch[1]);
+        }
+        respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
+    }
+
     if ($method === 'GET' && preg_match('#^documents/([^/]+)/view$#', $path, $matches)) {
         serve_document($pdo, $userId, $controlId, $matches[1], $env);
     }
@@ -133,7 +167,11 @@ try {
     if ($method === 'POST' && preg_match('#^transactions/([^/]+)/(confirm|dismiss|remove|update)$#', $path, $matches)) {
         if ($matches[2] === 'update') {
             $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
-            $updated = update_transaction($pdo, $userId, $controlId, $matches[1], normalize_transaction_changes($body));
+            $changes = normalize_transaction_changes($body);
+            if ($changes['accountId'] && !wallet_belongs_to_control($pdo, $changes['accountId'], $controlId)) {
+                respond(['error' => 'Carteira inválida para este controle financeiro.'], 400);
+            }
+            $updated = update_transaction($pdo, $userId, $controlId, $matches[1], $changes);
             if (!$updated) {
                 respond(['error' => 'Lancamento nao encontrado'], 404);
             }
@@ -473,6 +511,7 @@ function ensure_schema(PDO $pdo): void
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS financial_accounts (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        control_id BIGINT UNSIGNED NULL,
         user_id BIGINT UNSIGNED NOT NULL,
         name VARCHAR(120) NOT NULL,
         type ENUM('checking', 'savings', 'cash', 'credit_card', 'investment') NOT NULL,
@@ -530,6 +569,7 @@ function ensure_schema(PDO $pdo): void
     )");
 
     add_column_if_missing($pdo, 'categories', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
+    add_column_if_missing($pdo, 'financial_accounts', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
     add_column_if_missing($pdo, 'transactions', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
     add_column_if_missing($pdo, 'documents', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
     add_column_if_missing($pdo, 'chat_messages', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
@@ -570,6 +610,9 @@ function migrate_default_control(PDO $pdo): void
     foreach (['categories', 'transactions', 'documents', 'chat_messages'] as $table) {
         $pdo->prepare("UPDATE {$table} SET control_id = ? WHERE control_id IS NULL")->execute([$controlId]);
     }
+    $stmt = $pdo->prepare('UPDATE financial_accounts SET control_id = ? WHERE control_id IS NULL AND user_id = ?');
+    $stmt->execute([$controlId, $userId]);
+    $pdo->exec('UPDATE financial_accounts a INNER JOIN (SELECT user_id, MIN(control_id) AS control_id FROM control_members GROUP BY user_id) m ON m.user_id = a.user_id SET a.control_id = m.control_id WHERE a.control_id IS NULL');
 }
 
 function ensure_category_unique_index(PDO $pdo): void
@@ -681,6 +724,84 @@ function verify_password(string $password, string $storedHash): bool
     }
 
     return password_verify($password, $storedHash);
+}
+
+function update_profile(PDO $pdo, int $userId, array $body): void
+{
+    $name = mb_substr(trim((string)($body['name'] ?? '')), 0, 120);
+    $email = strtolower(trim((string)($body['email'] ?? '')));
+    if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) respond(['error' => 'Informe nome e e-mail válidos.'], 400);
+    $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1');
+    $stmt->execute([$email, $userId]);
+    if ($stmt->fetchColumn()) respond(['error' => 'Este e-mail já está sendo usado.'], 409);
+    $stmt = $pdo->prepare('UPDATE users SET name = ?, email = ? WHERE id = ?');
+    $stmt->execute([$name, $email, $userId]);
+}
+
+function change_password(PDO $pdo, int $userId, array $body): void
+{
+    $current = (string)($body['currentPassword'] ?? '');
+    $new = (string)($body['newPassword'] ?? '');
+    if (strlen($new) < 6) respond(['error' => 'A nova senha precisa ter pelo menos 6 caracteres.'], 400);
+    $stmt = $pdo->prepare('SELECT password_hash FROM users WHERE id = ? LIMIT 1');
+    $stmt->execute([$userId]);
+    $hash = (string)($stmt->fetchColumn() ?: '');
+    if ($hash === '' || !verify_password($current, $hash)) respond(['error' => 'A senha atual está incorreta.'], 401);
+    $stmt = $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?');
+    $stmt->execute([hash_password($new), $userId]);
+}
+
+function rename_control(PDO $pdo, int $userId, int $controlId, array $body): void
+{
+    $name = mb_substr(trim((string)($body['name'] ?? '')), 0, 160);
+    if ($name === '') respond(['error' => 'Informe o nome do controle financeiro.'], 400);
+    $stmt = $pdo->prepare('SELECT id FROM financial_controls WHERE id = ? AND owner_user_id = ? LIMIT 1');
+    $stmt->execute([$controlId, $userId]);
+    if (!$stmt->fetchColumn()) respond(['error' => 'Somente o proprietário pode alterar este nome.'], 403);
+    $stmt = $pdo->prepare('UPDATE financial_controls SET name = ? WHERE id = ?');
+    $stmt->execute([$name, $controlId]);
+}
+
+function normalize_wallet(array $body): array
+{
+    $types = ['checking', 'savings', 'cash', 'credit_card', 'investment'];
+    $name = mb_substr(trim((string)($body['name'] ?? '')), 0, 120);
+    $type = in_array($body['type'] ?? '', $types, true) ? $body['type'] : 'checking';
+    $openingBalance = (float)str_replace(',', '.', (string)($body['openingBalance'] ?? '0'));
+    if ($name === '' || !is_finite($openingBalance)) respond(['error' => 'Preencha os dados da carteira corretamente.'], 400);
+    return compact('name', 'type', 'openingBalance');
+}
+
+function create_wallet(PDO $pdo, int $userId, int $controlId, array $body): void
+{
+    $wallet = normalize_wallet($body);
+    $stmt = $pdo->prepare('INSERT INTO financial_accounts (control_id, user_id, name, type, opening_balance) VALUES (?, ?, ?, ?, ?)');
+    $stmt->execute([$controlId, $userId, $wallet['name'], $wallet['type'], $wallet['openingBalance']]);
+}
+
+function update_wallet(PDO $pdo, int $controlId, string $walletId, array $body): void
+{
+    $wallet = normalize_wallet($body);
+    $stmt = $pdo->prepare('UPDATE financial_accounts SET name = ?, type = ?, opening_balance = ? WHERE id = ? AND control_id = ?');
+    $stmt->execute([$wallet['name'], $wallet['type'], $wallet['openingBalance'], $walletId, $controlId]);
+    if ($stmt->rowCount() === 0 && !wallet_belongs_to_control($pdo, $walletId, $controlId)) respond(['error' => 'Carteira não encontrada.'], 404);
+}
+
+function remove_wallet(PDO $pdo, int $controlId, string $walletId): void
+{
+    $stmt = $pdo->prepare('SELECT id FROM transactions WHERE account_id = ? AND control_id = ? LIMIT 1');
+    $stmt->execute([$walletId, $controlId]);
+    if ($stmt->fetchColumn()) respond(['error' => 'Esta carteira possui lançamentos e não pode ser removida.'], 409);
+    $stmt = $pdo->prepare('DELETE FROM financial_accounts WHERE id = ? AND control_id = ?');
+    $stmt->execute([$walletId, $controlId]);
+    if ($stmt->rowCount() === 0) respond(['error' => 'Carteira não encontrada.'], 404);
+}
+
+function wallet_belongs_to_control(PDO $pdo, string $walletId, int $controlId): bool
+{
+    $stmt = $pdo->prepare('SELECT id FROM financial_accounts WHERE id = ? AND control_id = ? LIMIT 1');
+    $stmt->execute([$walletId, $controlId]);
+    return (bool)$stmt->fetchColumn();
 }
 
 function request_password_reset(PDO $pdo, array $env, array $body): void
@@ -907,9 +1028,9 @@ function set_active_control(PDO $pdo, int $controlId): void
 
 function share_control(PDO $pdo, int $ownerUserId, int $controlId, string $email): void
 {
-    if (!user_can_access_control($pdo, $ownerUserId, $controlId)) {
-        respond(['error' => 'Sem acesso ao controle financeiro.'], 403);
-    }
+    $stmt = $pdo->prepare('SELECT id FROM financial_controls WHERE id = ? AND owner_user_id = ? LIMIT 1');
+    $stmt->execute([$controlId, $ownerUserId]);
+    if (!$stmt->fetchColumn()) respond(['error' => 'Somente o proprietário pode compartilhar este controle.'], 403);
     $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
     $stmt->execute([strtolower($email)]);
     $targetUserId = (int)$stmt->fetchColumn();
@@ -946,6 +1067,8 @@ function read_data(PDO $pdo, int $userId, int $controlId): array
         t.description,
         t.merchant,
         t.payment_method AS paymentMethod,
+        CAST(t.account_id AS CHAR) AS accountId,
+        a.name AS accountName,
         t.transaction_date AS transactionDate,
         t.due_date AS dueDate,
         COALESCE(c.name, 'Outros') AS category,
@@ -955,6 +1078,7 @@ function read_data(PDO $pdo, int $userId, int $controlId): array
         t.created_at AS createdAt
         FROM transactions t
         LEFT JOIN categories c ON c.id = t.category_id
+        LEFT JOIN financial_accounts a ON a.id = t.account_id
         WHERE t.control_id = ?
         ORDER BY t.created_at DESC, t.id DESC");
     $stmt->execute([$controlId]);
@@ -964,7 +1088,21 @@ function read_data(PDO $pdo, int $userId, int $controlId): array
     $stmt->execute([$controlId]);
     $documents = array_map('normalize_dates', $stmt->fetchAll());
 
-    return compact('messages', 'transactions', 'documents');
+    $stmt = $pdo->prepare("SELECT CAST(a.id AS CHAR) AS id, a.name, a.type,
+        CAST(a.opening_balance AS DECIMAL(14,2)) AS openingBalance,
+        CAST(a.opening_balance + COALESCE(SUM(CASE
+          WHEN t.status IN ('confirmed', 'paid') AND t.kind = 'income' THEN t.amount
+          WHEN t.status IN ('confirmed', 'paid') AND t.kind = 'expense' THEN -t.amount
+          ELSE 0 END), 0) AS DECIMAL(14,2)) AS balance
+        FROM financial_accounts a
+        LEFT JOIN transactions t ON t.account_id = a.id
+        WHERE a.control_id = ?
+        GROUP BY a.id, a.name, a.type, a.opening_balance
+        ORDER BY a.name");
+    $stmt->execute([$controlId]);
+    $wallets = $stmt->fetchAll();
+
+    return compact('messages', 'transactions', 'documents', 'wallets');
 }
 
 function add_message(PDO $pdo, int $userId, int $controlId, string $role, string $content): void
@@ -977,12 +1115,13 @@ function add_transaction(PDO $pdo, int $userId, int $controlId, array $transacti
 {
     $categoryId = ensure_category($pdo, $userId, $controlId, $transaction['category'], $transaction['kind']);
     $stmt = $pdo->prepare('INSERT INTO transactions (
-        control_id, user_id, category_id, kind, status, amount, description, merchant, payment_method,
+        control_id, user_id, account_id, category_id, kind, status, amount, description, merchant, payment_method,
         transaction_date, due_date, source, raw_text, confidence
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
     $stmt->execute([
         $controlId,
         $userId,
+        $transaction['accountId'] ?? null,
         $categoryId,
         $transaction['kind'],
         $transaction['status'],
@@ -1167,6 +1306,7 @@ function update_transaction(PDO $pdo, int $userId, int $controlId, string $id, a
             description = ?,
             merchant = ?,
             payment_method = ?,
+            account_id = ?,
             transaction_date = ?,
             due_date = ?
         WHERE id = ? AND user_id = ? AND control_id = ? AND status = ?');
@@ -1177,6 +1317,7 @@ function update_transaction(PDO $pdo, int $userId, int $controlId, string $id, a
         $changes['description'],
         $changes['merchant'],
         $changes['paymentMethod'],
+        $changes['accountId'],
         $changes['transactionDate'],
         $changes['dueDate'],
         $id,
@@ -1221,6 +1362,7 @@ function build_state(array $data, array $sessionPayload): array
         'transactions' => $confirmed,
         'pendingTransactions' => $pending,
         'documents' => $data['documents'],
+        'wallets' => $data['wallets'] ?? [],
         'session' => $sessionPayload,
         'summary' => [
             'income' => $income,
@@ -1918,6 +2060,7 @@ function normalize_transaction_changes(array $body): array
         'description' => mb_substr(trim((string)($body['description'] ?? '')) ?: 'Lancamento sem descricao', 0, 160),
         'merchant' => trim((string)($body['merchant'] ?? '')) ?: null,
         'paymentMethod' => trim((string)($body['paymentMethod'] ?? '')) ?: null,
+        'accountId' => trim((string)($body['accountId'] ?? '')) ?: null,
         'transactionDate' => normalize_date((string)($body['transactionDate'] ?? '')),
         'dueDate' => trim((string)($body['dueDate'] ?? '')) !== '' ? normalize_date((string)$body['dueDate']) : null,
         'category' => trim((string)($body['category'] ?? '')) ?: ($kind === 'income' ? 'Renda' : 'Outros'),

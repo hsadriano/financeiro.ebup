@@ -57,6 +57,8 @@ export class MariaDbStorage {
          t.description,
          t.merchant,
          t.payment_method AS paymentMethod,
+         CAST(t.account_id AS CHAR) AS accountId,
+         a.name AS accountName,
          t.transaction_date AS transactionDate,
          t.due_date AS dueDate,
          COALESCE(c.name, 'Outros') AS category,
@@ -66,6 +68,7 @@ export class MariaDbStorage {
          t.created_at AS createdAt
        FROM transactions t
        LEFT JOIN categories c ON c.id = t.category_id
+       LEFT JOIN financial_accounts a ON a.id = t.account_id
        WHERE t.control_id = ?
        ORDER BY t.created_at DESC, t.id DESC`,
       [this.controlId]
@@ -85,10 +88,25 @@ export class MariaDbStorage {
       [this.controlId]
     );
 
+    const [wallets] = await this.pool.execute(
+      `SELECT CAST(a.id AS CHAR) AS id, a.name, a.type, a.opening_balance AS openingBalance,
+        a.opening_balance + COALESCE(SUM(CASE
+          WHEN t.status IN ('confirmed', 'paid') AND t.kind = 'income' THEN t.amount
+          WHEN t.status IN ('confirmed', 'paid') AND t.kind = 'expense' THEN -t.amount
+          ELSE 0 END), 0) AS balance
+       FROM financial_accounts a
+       LEFT JOIN transactions t ON t.account_id = a.id
+       WHERE a.control_id = ?
+       GROUP BY a.id, a.name, a.type, a.opening_balance
+       ORDER BY a.name`,
+      [this.controlId]
+    );
+
     return {
       messages: messages.map(normalizeDates),
       transactions: transactions.map(normalizeTransaction),
-      documents: documents.map(normalizeDates)
+      documents: documents.map(normalizeDates),
+      wallets
     };
   }
 
@@ -109,12 +127,13 @@ export class MariaDbStorage {
     const categoryId = await this.ensureCategory(transaction.category, transaction.kind);
     const [result] = await this.pool.execute(
       `INSERT INTO transactions (
-         control_id, user_id, category_id, kind, status, amount, description, merchant, payment_method,
+         control_id, user_id, account_id, category_id, kind, status, amount, description, merchant, payment_method,
          transaction_date, due_date, source, raw_text, confidence
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         this.controlId,
         this.userId,
+        transaction.accountId || null,
         categoryId,
         transaction.kind,
         transaction.status,
@@ -147,6 +166,8 @@ export class MariaDbStorage {
          t.description,
          t.merchant,
          t.payment_method AS paymentMethod,
+         CAST(t.account_id AS CHAR) AS accountId,
+         a.name AS accountName,
          t.transaction_date AS transactionDate,
          t.due_date AS dueDate,
          COALESCE(c.name, 'Outros') AS category,
@@ -156,6 +177,7 @@ export class MariaDbStorage {
          t.created_at AS createdAt
        FROM transactions t
        LEFT JOIN categories c ON c.id = t.category_id
+       LEFT JOIN financial_accounts a ON a.id = t.account_id
        WHERE t.id = ? AND t.user_id = ? AND t.control_id = ?
        LIMIT 1`,
       [id, this.userId, this.controlId]
@@ -173,6 +195,7 @@ export class MariaDbStorage {
            description = ?,
            merchant = ?,
            payment_method = ?,
+           account_id = ?,
            transaction_date = ?,
            due_date = ?
        WHERE id = ? AND user_id = ? AND control_id = ? AND status = 'pending'`,
@@ -183,6 +206,7 @@ export class MariaDbStorage {
         changes.description,
         changes.merchant,
         changes.paymentMethod,
+        changes.accountId || null,
         changes.transactionDate,
         changes.dueDate,
         id,
@@ -200,6 +224,8 @@ export class MariaDbStorage {
          t.description,
          t.merchant,
          t.payment_method AS paymentMethod,
+         CAST(t.account_id AS CHAR) AS accountId,
+         a.name AS accountName,
          t.transaction_date AS transactionDate,
          t.due_date AS dueDate,
          COALESCE(c.name, 'Outros') AS category,
@@ -209,6 +235,7 @@ export class MariaDbStorage {
          t.created_at AS createdAt
        FROM transactions t
        LEFT JOIN categories c ON c.id = t.category_id
+       LEFT JOIN financial_accounts a ON a.id = t.account_id
        WHERE t.id = ? AND t.user_id = ? AND t.control_id = ?
        LIMIT 1`,
       [id, this.userId, this.controlId]
@@ -313,6 +340,7 @@ export class MariaDbStorage {
     await this.pool.execute(`
       CREATE TABLE IF NOT EXISTS financial_accounts (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        control_id BIGINT UNSIGNED NULL,
         user_id BIGINT UNSIGNED NOT NULL,
         name VARCHAR(120) NOT NULL,
         type ENUM('checking', 'savings', 'cash', 'credit_card', 'investment') NOT NULL,
@@ -385,6 +413,7 @@ export class MariaDbStorage {
     `);
 
     await this.addColumnIfMissing("categories", "control_id", "BIGINT UNSIGNED NULL AFTER id");
+    await this.addColumnIfMissing("financial_accounts", "control_id", "BIGINT UNSIGNED NULL AFTER id");
     await this.addColumnIfMissing("transactions", "control_id", "BIGINT UNSIGNED NULL AFTER id");
     await this.addColumnIfMissing("documents", "control_id", "BIGINT UNSIGNED NULL AFTER id");
     await this.addColumnIfMissing("chat_messages", "control_id", "BIGINT UNSIGNED NULL AFTER id");
@@ -406,6 +435,10 @@ export class MariaDbStorage {
     for (const table of ["categories", "transactions", "documents", "chat_messages"]) {
       await this.pool.execute(`UPDATE ${table} SET control_id = ? WHERE control_id IS NULL`, [controlId]);
     }
+    await this.pool.execute(`UPDATE financial_accounts SET control_id = ? WHERE control_id IS NULL AND user_id = ?`, [controlId, userId]);
+    await this.pool.execute(`UPDATE financial_accounts a
+      INNER JOIN (SELECT user_id, MIN(control_id) AS control_id FROM control_members GROUP BY user_id) m ON m.user_id = a.user_id
+      SET a.control_id = m.control_id WHERE a.control_id IS NULL`);
   }
 
   async ensureCategoryUniqueIndex() {

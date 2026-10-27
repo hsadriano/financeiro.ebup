@@ -3,6 +3,7 @@ import path from "node:path";
 
 const initialData = {
   transactions: [],
+  wallets: [],
   documents: [],
   messages: [
     {

@@ -192,7 +192,8 @@ select {
 .sidebar,
 .chat-area,
 .ledger,
-.files-panel {
+.files-panel,
+.settings-panel {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -201,7 +202,8 @@ select {
 
 .sidebar,
 .ledger,
-.files-panel {
+.files-panel,
+.settings-panel {
   padding: 16px;
   overflow: hidden;
 }
@@ -560,7 +562,7 @@ h2 {
 
 .tabbar {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 6px;
   padding: 6px;
   border: 1px solid var(--line);
@@ -605,6 +607,86 @@ h2 {
   font-size: 0.72rem;
   line-height: 1;
 }
+
+.settings-panel {
+  padding: 18px;
+  overflow-y: auto;
+}
+
+.settings-header { margin-bottom: 8px; }
+.settings-header h1,
+.settings-header p,
+.settings-section-title h2,
+.settings-section-title p { margin: 0; }
+.settings-header p,
+.settings-section-title p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+.settings-section {
+  display: grid;
+  gap: 12px;
+  padding: 18px 0;
+  border-top: 1px solid var(--line);
+}
+.settings-section-title h2 { font-size: 1rem; }
+.settings-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(150px, .9fr) minmax(130px, .7fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+.settings-form.two-columns { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+.settings-form label,
+.wallet-editor label { display: grid; gap: 5px; min-width: 0; }
+.settings-form label span,
+.wallet-editor label span { color: var(--muted); font-size: .76rem; font-weight: 800; }
+.settings-form input,
+.settings-form select,
+.wallet-editor input,
+.wallet-editor select {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--ink);
+  background: #fff;
+}
+.settings-form button,
+.wallet-actions button {
+  min-height: 42px;
+  border: 1px solid var(--green);
+  border-radius: 8px;
+  padding: 0 14px;
+  color: #fff;
+  background: var(--green);
+  font-weight: 800;
+  cursor: pointer;
+}
+.settings-feedback {
+  margin: 10px 0;
+  padding: 10px;
+  border-left: 3px solid var(--green);
+  color: var(--green);
+  background: var(--surface-2);
+  font-weight: 700;
+}
+.settings-feedback.error { border-color: var(--red); color: var(--red); }
+.wallet-list { display: grid; gap: 8px; }
+.wallet-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(140px, .9fr) minmax(120px, .7fr) auto;
+  gap: 8px;
+  align-items: end;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.wallet-balance { display: block; margin-top: 4px; color: var(--muted); font-size: .76rem; }
+.wallet-actions { display: flex; gap: 6px; }
+.wallet-actions .wallet-remove { border-color: var(--line); color: var(--red); background: #fff; }
 
 .category-row,
 .document-row,
@@ -998,7 +1080,8 @@ h2 {
 
   .ledger,
   .sidebar,
-  .files-panel {
+  .files-panel,
+  .settings-panel {
     max-height: calc(100dvh - 184px);
   }
 }
@@ -1066,7 +1149,8 @@ h2 {
   .chat-area,
   .sidebar,
   .ledger,
-  .files-panel {
+  .files-panel,
+  .settings-panel {
     width: 100%;
     height: 100%;
     min-height: 0;
@@ -1075,7 +1159,8 @@ h2 {
 
   .sidebar,
   .ledger,
-  .files-panel {
+  .files-panel,
+  .settings-panel {
     padding-bottom: calc(20px + env(safe-area-inset-bottom));
     overflow-x: hidden;
     overflow-y: auto;
@@ -1154,4 +1239,11 @@ h2 {
     max-height: none;
     overflow: visible;
   }
+
+  .settings-panel { padding: 14px; }
+  .settings-form,
+  .settings-form.two-columns,
+  .wallet-editor { grid-template-columns: 1fr; }
+  .wallet-actions { justify-content: stretch; }
+  .wallet-actions button { flex: 1; }
 }

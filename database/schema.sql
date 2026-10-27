@@ -51,6 +51,7 @@ CREATE TABLE password_reset_tokens (
 
 CREATE TABLE financial_accounts (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  control_id BIGINT UNSIGNED NULL,
   user_id BIGINT UNSIGNED NOT NULL,
   name VARCHAR(120) NOT NULL,
   type ENUM('checking', 'savings', 'cash', 'credit_card', 'investment') NOT NULL,

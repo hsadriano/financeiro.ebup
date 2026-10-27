@@ -119,6 +119,34 @@ const server = createServer(async (request, response) => {
       return sendJson(response, await sessionPayload(session));
     }
 
+    if (request.method === "POST" && url.pathname === "/api/settings/profile") {
+      const body = await readJson(request);
+      await updateProfile(session.userId, body);
+      return sendJson(response, await sessionPayload(session));
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/settings/password") {
+      await changePassword(session.userId, await readJson(request));
+      return sendJson(response, { ok: true });
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/settings/control") {
+      await renameControl(session.userId, session.activeControlId, await readJson(request));
+      return sendJson(response, await sessionPayload(session));
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/settings/wallets") {
+      await createWallet(session.userId, session.activeControlId, await readJson(request));
+      return sendJson(response, buildState(await storage.read()));
+    }
+
+    const walletRoute = url.pathname.match(/^\/api\/settings\/wallets\/([^/]+)\/(update|remove)$/);
+    if (request.method === "POST" && walletRoute) {
+      if (walletRoute[2] === "update") await updateWallet(session.activeControlId, walletRoute[1], await readJson(request));
+      else await removeWallet(session.activeControlId, walletRoute[1]);
+      return sendJson(response, buildState(await storage.read()));
+    }
+
     if (request.method === "GET" && url.pathname === "/api/state") {
       return sendJson(response, { ...buildState(await storage.read()), session: await sessionPayload(session) });
     }
@@ -152,6 +180,9 @@ const server = createServer(async (request, response) => {
       if (action === "update") {
         const body = await readJson(request);
         const changes = normalizeTransactionChanges(body);
+        if (changes.accountId && !(await walletBelongsToControl(changes.accountId, session.activeControlId))) {
+          return sendJson(response, { error: "Carteira inválida para este controle financeiro." }, 400);
+        }
         const updated = await storage.updateTransaction(id, changes);
         if (!updated) return sendJson(response, { error: "Lancamento nao encontrado" }, 404);
         return sendJson(response, buildState(await storage.read()));
@@ -321,6 +352,7 @@ function buildState(data) {
   return {
     messages: data.messages,
     transactions: confirmedTransactions.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    wallets: data.wallets || [],
     pendingTransactions: pendingTransactions.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
     documents: data.documents.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
     summary: {
@@ -536,6 +568,7 @@ function normalizeTransactionChanges(body) {
     description: String(body.description || "").trim().slice(0, 160) || "Lancamento sem descricao",
     merchant: String(body.merchant || "").trim() || null,
     paymentMethod: String(body.paymentMethod || "").trim() || null,
+    accountId: String(body.accountId || "").trim() || null,
     transactionDate: normalizeDate(body.transactionDate),
     dueDate: body.dueDate ? normalizeDate(body.dueDate) : null,
     category: String(body.category || "").trim() || (kind === "income" ? "Renda" : "Outros")
@@ -896,6 +929,79 @@ function safeCompareHex(actual, expected) {
   return actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
+async function updateProfile(userId, body) {
+  const name = String(body.name || "").trim().slice(0, 120);
+  const email = String(body.email || "").trim().toLowerCase();
+  if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw httpError("Informe nome e e-mail válidos.", 400);
+  const [duplicate] = await storage.pool.execute(`SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1`, [email, userId]);
+  if (duplicate.length) throw httpError("Este e-mail já está sendo usado.", 409);
+  await storage.pool.execute(`UPDATE users SET name = ?, email = ? WHERE id = ?`, [name, email, userId]);
+}
+
+async function changePassword(userId, body) {
+  const currentPassword = String(body.currentPassword || "");
+  const newPassword = String(body.newPassword || "");
+  if (newPassword.length < 6) throw httpError("A nova senha precisa ter pelo menos 6 caracteres.", 400);
+  const [rows] = await storage.pool.execute(`SELECT password_hash AS passwordHash FROM users WHERE id = ? LIMIT 1`, [userId]);
+  if (!rows[0]?.passwordHash || !(await verifyPassword(currentPassword, rows[0].passwordHash))) {
+    throw httpError("A senha atual está incorreta.", 401);
+  }
+  await storage.pool.execute(`UPDATE users SET password_hash = ? WHERE id = ?`, [await hashPassword(newPassword), userId]);
+}
+
+async function renameControl(userId, controlId, body) {
+  const name = String(body.name || "").trim().slice(0, 160);
+  if (!name) throw httpError("Informe o nome do controle financeiro.", 400);
+  const [owned] = await storage.pool.execute(`SELECT id FROM financial_controls WHERE id = ? AND owner_user_id = ? LIMIT 1`, [controlId, userId]);
+  if (!owned.length) throw httpError("Somente o proprietário pode alterar este nome.", 403);
+  await storage.pool.execute(`UPDATE financial_controls SET name = ? WHERE id = ?`, [name, controlId]);
+}
+
+const walletTypes = new Set(["checking", "savings", "cash", "credit_card", "investment"]);
+
+function normalizedWallet(body) {
+  const name = String(body.name || "").trim().slice(0, 120);
+  const type = walletTypes.has(body.type) ? body.type : "checking";
+  const openingBalance = Number(String(body.openingBalance ?? "0").replace(",", "."));
+  if (!name || !Number.isFinite(openingBalance)) throw httpError("Preencha os dados da carteira corretamente.", 400);
+  return { name, type, openingBalance };
+}
+
+async function createWallet(userId, controlId, body) {
+  const wallet = normalizedWallet(body);
+  await storage.pool.execute(
+    `INSERT INTO financial_accounts (control_id, user_id, name, type, opening_balance) VALUES (?, ?, ?, ?, ?)`,
+    [controlId, userId, wallet.name, wallet.type, wallet.openingBalance]
+  );
+}
+
+async function updateWallet(controlId, walletId, body) {
+  const wallet = normalizedWallet(body);
+  const [result] = await storage.pool.execute(
+    `UPDATE financial_accounts SET name = ?, type = ?, opening_balance = ? WHERE id = ? AND control_id = ?`,
+    [wallet.name, wallet.type, wallet.openingBalance, walletId, controlId]
+  );
+  if (!result.affectedRows) throw httpError("Carteira não encontrada.", 404);
+}
+
+async function removeWallet(controlId, walletId) {
+  const [used] = await storage.pool.execute(`SELECT id FROM transactions WHERE account_id = ? AND control_id = ? LIMIT 1`, [walletId, controlId]);
+  if (used.length) throw httpError("Esta carteira possui lançamentos e não pode ser removida.", 409);
+  const [result] = await storage.pool.execute(`DELETE FROM financial_accounts WHERE id = ? AND control_id = ?`, [walletId, controlId]);
+  if (!result.affectedRows) throw httpError("Carteira não encontrada.", 404);
+}
+
+async function walletBelongsToControl(walletId, controlId) {
+  const [rows] = await storage.pool.execute(`SELECT id FROM financial_accounts WHERE id = ? AND control_id = ? LIMIT 1`, [walletId, controlId]);
+  return rows.length > 0;
+}
+
+function httpError(message, status) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
 async function registerUser(body) {
   const name = String(body.name || "").trim();
   const email = String(body.email || "").trim().toLowerCase();
@@ -1120,11 +1226,8 @@ async function setActiveControl(request, controlId) {
 }
 
 async function shareControl(ownerUserId, controlId, email) {
-  if (!(await userCanAccessControl(ownerUserId, controlId))) {
-    const error = new Error("Sem acesso ao controle financeiro.");
-    error.status = 403;
-    throw error;
-  }
+  const [owned] = await storage.pool.execute(`SELECT id FROM financial_controls WHERE id = ? AND owner_user_id = ? LIMIT 1`, [controlId, ownerUserId]);
+  if (!owned.length) throw httpError("Somente o proprietário pode compartilhar este controle.", 403);
   const normalizedEmail = String(email || "").trim().toLowerCase();
   const [rows] = await storage.pool.execute(`SELECT id FROM users WHERE email = ? LIMIT 1`, [normalizedEmail]);
   const user = rows[0];

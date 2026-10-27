@@ -38,6 +38,8 @@ Em hospedagem PHP/Apache, como Hostinger compartilhada, o projeto tambem roda di
 - Upload de imagens/PDFs/comprovantes para iniciar o fluxo de conferência.
 - OCR de imagens com OpenAI quando `OPENAI_API_KEY` estiver configurada.
 - Dashboard mensal com receitas, despesas, resultado, contas a pagar e categorias.
+- Área de configurações para editar perfil, senha, controle compartilhado e carteiras.
+- Carteiras vinculáveis aos lançamentos, com tipo, saldo inicial e saldo calculado.
 - Armazenamento em MariaDB quando `.env` estiver configurado.
 - Fallback local em `data/finance.json` quando não houver configuração de banco.
 - Schema MariaDB em `database/schema.sql`.

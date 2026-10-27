@@ -11,7 +11,7 @@
     <link rel="icon" type="image/png" href="/finup-favicon.png" />
     <link rel="apple-touch-icon" href="/finup-logo.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/styles.css?v=20260927-1" />
+    <link rel="stylesheet" href="/styles.css?v=20261027-1" />
   </head>
   <body>
     <section id="auth-screen" class="auth-screen">
@@ -202,6 +202,55 @@
           </div>
           <div id="documents" class="document-list"></div>
         </aside>
+
+        <section class="settings-panel panel-screen" data-panel="settings" aria-label="Configurações">
+          <header class="settings-header">
+            <h1>Configurações</h1>
+            <p>Gerencie seu acesso, suas carteiras e este controle financeiro.</p>
+          </header>
+          <p id="settings-feedback" class="settings-feedback" hidden></p>
+
+          <section class="settings-section">
+            <div class="settings-section-title"><h2>Perfil</h2><p>Dados usados para identificar sua conta.</p></div>
+            <form id="profile-form" class="settings-form two-columns">
+              <label><span>Nome</span><input id="profile-name" name="name" autocomplete="name" required /></label>
+              <label><span>E-mail</span><input id="profile-email" name="email" type="email" autocomplete="email" required /></label>
+              <button type="submit">Salvar perfil</button>
+            </form>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section-title"><h2>Carteiras</h2><p>Contas bancárias, dinheiro, cartões e investimentos deste controle.</p></div>
+            <div id="wallet-list" class="wallet-list"></div>
+            <form id="wallet-form" class="settings-form wallet-form">
+              <label><span>Nome</span><input name="name" placeholder="Ex.: Conta principal" required /></label>
+              <label><span>Tipo</span><select name="type"><option value="checking">Conta corrente</option><option value="savings">Poupança</option><option value="cash">Dinheiro</option><option value="credit_card">Cartão de crédito</option><option value="investment">Investimento</option></select></label>
+              <label><span>Saldo inicial</span><input name="openingBalance" inputmode="decimal" value="0,00" /></label>
+              <button type="submit">Adicionar carteira</button>
+            </form>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section-title"><h2>Controle financeiro</h2><p>Nome do espaço compartilhado e acesso de outras pessoas.</p></div>
+            <form id="control-settings-form" class="settings-form two-columns">
+              <label><span>Nome</span><input id="control-settings-name" name="name" required /></label>
+              <button type="submit">Salvar nome</button>
+            </form>
+            <form id="share-settings-form" class="settings-form two-columns">
+              <label><span>Compartilhar com</span><input name="email" type="email" placeholder="email@exemplo.com" required /></label>
+              <button type="submit">Conceder acesso</button>
+            </form>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section-title"><h2>Segurança</h2><p>Troque sua senha sem sair do aplicativo.</p></div>
+            <form id="password-form" class="settings-form two-columns">
+              <label><span>Senha atual</span><input name="currentPassword" type="password" autocomplete="current-password" required /></label>
+              <label><span>Nova senha</span><input name="newPassword" type="password" autocomplete="new-password" minlength="6" required /></label>
+              <button type="submit">Alterar senha</button>
+            </form>
+          </section>
+        </section>
       </section>
 
       <nav class="tabbar" aria-label="Navegação principal">
@@ -219,6 +268,9 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4c0-1.1.9-2 2-2h6l6 6v12c0 1.1-.9 2-2 2H7c-1.1 0-2-.9-2-2V4Zm8 1v4h4l-4-4ZM8 13h8v-2H8v2Zm0 4h8v-2H8v2Z" /></svg>
           <span id="files-badge" class="badge" hidden>0</span>
         </button>
+        <button type="button" data-tab="settings" aria-label="Configurações" title="Configurações">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.7 7.7 0 0 0 0-2l2-1.6-2-3.4-2.5 1a8 8 0 0 0-1.7-1L14.8 3h-4l-.4 2.9a8 8 0 0 0-1.7 1L6.2 6l-2 3.4 2 1.6a7.7 7.7 0 0 0 0 2l-2 1.6 2 3.4 2.5-1a8 8 0 0 0 1.7 1l.4 3h4l.4-3a8 8 0 0 0 1.7-1l2.5 1 2-3.4-2-1.6ZM12.8 15.5a3.6 3.6 0 1 1 0-7.1 3.6 3.6 0 0 1 0 7.1Z" /></svg>
+        </button>
       </nav>
       <input id="file-input" class="file-input" type="file" accept="image/*,.pdf,.txt,.csv" />
     </main>
@@ -235,6 +287,6 @@
       <option value="Outros"></option>
     </datalist>
 
-    <script src="/app.js?v=20260927-1" type="module"></script>
+    <script src="/app.js?v=20261027-1" type="module"></script>
   </body>
 </html>
