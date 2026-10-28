@@ -699,9 +699,45 @@ h2 {
 
 .confirmed-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: start;
+}
+
+.transaction-row-main {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.transaction-select {
+  display: grid;
+  flex: 0 0 24px;
+  min-height: 24px;
+  place-items: center;
+}
+
+.transaction-select input,
+.bulk-select-visible input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--green);
+}
+
+.transaction-description { min-width: 0; }
+.transaction-description strong { overflow-wrap: anywhere; }
+
+.series-select-button {
+  margin-left: 4px;
+  padding: 0;
+  border: 0;
+  color: var(--blue);
+  background: transparent;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 .confirmed-row .transaction-meta:last-child {
@@ -984,6 +1020,78 @@ h2 {
   background: #fff;
 }
 
+.bulk-update-toolbar {
+  display: grid;
+  grid-template-columns: auto auto minmax(150px, 1fr) minmax(150px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.bulk-update-toolbar label:not(.bulk-select-visible) {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.bulk-update-toolbar label > span,
+.bulk-selection-count {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.bulk-update-toolbar select,
+.bulk-update-toolbar input {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 9px;
+  color: var(--ink);
+  background: #fff;
+}
+
+.bulk-select-visible {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.bulk-selection-count {
+  align-self: center;
+  white-space: nowrap;
+}
+
+.bulk-update-toolbar button {
+  min-height: 36px;
+  border: 1px solid var(--green);
+  border-radius: 8px;
+  padding: 0 12px;
+  color: #fff;
+  background: var(--green);
+  font-size: 0.8rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.bulk-update-toolbar button:disabled {
+  border-color: var(--line);
+  color: var(--muted);
+  background: #f7f9f7;
+  cursor: not-allowed;
+}
+
 .review-actions button {
   min-height: 36px;
   border-radius: 8px;
@@ -1214,6 +1322,13 @@ h2 {
   .ledger-filters {
     grid-template-columns: 1fr;
   }
+
+  .bulk-update-toolbar {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .bulk-selection-count { justify-self: end; }
+  .bulk-update-toolbar button { grid-column: 1 / -1; }
 
   .confirmed-row {
     grid-template-columns: 1fr;

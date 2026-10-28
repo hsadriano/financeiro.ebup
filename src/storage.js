@@ -70,6 +70,29 @@ export class JsonStorage {
     return transaction;
   }
 
+  async bulkUpdateTransactions({ ids = [], recurrenceGroupId = null, accountId, amount }) {
+    const data = await this.read();
+    const selected = new Set(ids.map(String));
+    const wallet = accountId === undefined || accountId === null
+      ? null
+      : data.wallets.find((item) => String(item.id) === String(accountId));
+    const targets = data.transactions.filter((item) => item.status !== "dismissed" && (
+      recurrenceGroupId
+        ? item.recurrenceGroupId === recurrenceGroupId
+        : selected.has(String(item.id))
+    ));
+
+    for (const transaction of targets) {
+      if (accountId !== undefined) {
+        transaction.accountId = accountId;
+        transaction.accountName = wallet?.name || null;
+      }
+      if (amount !== undefined) transaction.amount = amount;
+    }
+    if (targets.length) await this.write(data);
+    return targets.length;
+  }
+
   async addDocument(document) {
     const data = await this.read();
     const saved = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...document };

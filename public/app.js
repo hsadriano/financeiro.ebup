@@ -8,6 +8,7 @@ const state = {
     category: ""
   },
   allTransactions: [],
+  selectedTransactionIds: new Set(),
   wallets: [],
   audioRecorder: null,
   audioStream: null,
@@ -59,6 +60,12 @@ const elements = {
   ledgerPeriodFilter: document.querySelector("#ledger-period-filter"),
   ledgerCategoryFilter: document.querySelector("#ledger-category-filter"),
   clearLedgerFilters: document.querySelector("#clear-ledger-filters"),
+  bulkUpdateForm: document.querySelector("#bulk-update-form"),
+  bulkSelectionCount: document.querySelector("#bulk-selection-count"),
+  selectVisibleTransactions: document.querySelector("#select-visible-transactions"),
+  bulkAccountSelect: document.querySelector("#bulk-account-select"),
+  bulkAmount: document.querySelector("#bulk-amount"),
+  applyBulkUpdate: document.querySelector("#apply-bulk-update"),
   form: document.querySelector("#chat-form"),
   input: document.querySelector("#message-input"),
   sendButton: document.querySelector('#chat-form button[type="submit"]'),
@@ -120,6 +127,57 @@ elements.clearLedgerFilters.addEventListener("click", () => {
   renderTransactions(state.allTransactions);
 });
 
+elements.selectVisibleTransactions.addEventListener("change", () => {
+  const visibleIds = filterTransactions(state.allTransactions).map((item) => String(item.id));
+  if (elements.selectVisibleTransactions.checked) {
+    visibleIds.forEach((id) => state.selectedTransactionIds.add(id));
+  } else {
+    visibleIds.forEach((id) => state.selectedTransactionIds.delete(id));
+  }
+  elements.transactions.querySelectorAll("[data-transaction-select]").forEach((checkbox) => {
+    checkbox.checked = state.selectedTransactionIds.has(String(checkbox.dataset.transactionSelect));
+  });
+  renderBulkUpdateToolbar(filterTransactions(state.allTransactions));
+});
+
+elements.bulkUpdateForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const ids = [...state.selectedTransactionIds];
+  if (!ids.length) return;
+  if (ids.length > 100) {
+    window.alert("Selecione no máximo 100 lançamentos por vez.");
+    return;
+  }
+  const payload = { ids };
+  if (elements.bulkAccountSelect.value === "__none") payload.accountId = null;
+  else if (elements.bulkAccountSelect.value !== "__keep") payload.accountId = elements.bulkAccountSelect.value;
+  const rawAmount = elements.bulkAmount.value.trim();
+  if (rawAmount) payload.amount = parseMoneyInput(rawAmount);
+  if (!Object.hasOwn(payload, "accountId") && !Object.hasOwn(payload, "amount")) {
+    window.alert("Escolha uma carteira ou informe um novo valor.");
+    return;
+  }
+  const changes = [
+    Object.hasOwn(payload, "accountId") ? `carteira ${elements.bulkAccountSelect.selectedOptions[0].textContent}` : "",
+    Object.hasOwn(payload, "amount") ? `valor ${rawAmount}` : ""
+  ].filter(Boolean).join(" e ");
+  if (!window.confirm(`Aplicar ${changes} a ${ids.length} lançamento(s)?`)) return;
+
+  elements.applyBulkUpdate.disabled = true;
+  const response = await postJson("/api/transactions/bulk-update", payload);
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({}));
+    window.alert(result.error || "Não foi possível atualizar os lançamentos.");
+    elements.applyBulkUpdate.disabled = false;
+    return;
+  }
+  state.selectedTransactionIds.clear();
+  elements.selectVisibleTransactions.checked = false;
+  elements.bulkAccountSelect.value = "__keep";
+  elements.bulkAmount.value = "";
+  await loadState();
+});
+
 elements.authForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (state.authMode === "reset") {
@@ -170,6 +228,7 @@ elements.logoutButton.addEventListener("click", async () => {
 });
 
 elements.controlSelect.addEventListener("change", async () => {
+  state.selectedTransactionIds.clear();
   await postJson("/api/controls/select", { controlId: elements.controlSelect.value });
   await loadSession();
   await loadState();
@@ -603,6 +662,8 @@ function render(data) {
   }
   state.lastSummary = data.summary;
   state.allTransactions = data.transactions || [];
+  const currentIds = new Set(state.allTransactions.map((item) => String(item.id)));
+  state.selectedTransactionIds = new Set([...state.selectedTransactionIds].filter((id) => currentIds.has(id)));
   state.wallets = data.wallets || [];
   elements.income.textContent = money(data.summary.income);
   elements.expenses.textContent = money(data.summary.expenses);
@@ -952,6 +1013,7 @@ function renderTransactions(transactions) {
   syncLedgerFilterControls();
   const filteredTransactions = filterTransactions(transactions);
   renderLedgerFilterSummary(filteredTransactions.length);
+  renderBulkUpdateToolbar(filteredTransactions);
 
   if (!filteredTransactions.length) {
     elements.transactions.innerHTML = `<p class="empty">Nenhum lançamento encontrado para este filtro.</p>`;
@@ -962,12 +1024,18 @@ function renderTransactions(transactions) {
     .map(
       (transaction) => `
         <article class="transaction-row confirmed-row" data-id="${escapeHtml(transaction.id)}">
-          <div>
-            <strong>${escapeHtml(transaction.description)}</strong>
-            <div class="transaction-meta">
+          <div class="transaction-row-main">
+            <label class="transaction-select" title="Selecionar lançamento">
+              <input type="checkbox" data-transaction-select="${escapeHtml(transaction.id)}" aria-label="Selecionar ${escapeAttribute(transaction.description)}" ${state.selectedTransactionIds.has(String(transaction.id)) ? "checked" : ""} />
+            </label>
+            <div class="transaction-description">
+              <strong>${escapeHtml(transaction.description)}</strong>
+              <div class="transaction-meta">
               ${escapeHtml(transaction.category)} · ${formatDate(transaction.transactionDate)}
               ${transaction.dueDate ? ` · vence ${formatDate(transaction.dueDate)}` : ""}
               ${transaction.accountName ? ` · ${escapeHtml(transaction.accountName)}` : ""}
+              ${transaction.recurrenceGroupId ? `<button type="button" class="series-select-button" data-select-series="${escapeHtml(transaction.recurrenceGroupId)}">Selecionar série${transaction.recurrenceTotal ? ` (${transaction.recurrenceTotal})` : ""}</button>` : ""}
+              </div>
             </div>
           </div>
           <div class="transaction-meta">
@@ -978,6 +1046,28 @@ function renderTransactions(transactions) {
       `
     )
     .join("");
+
+  elements.transactions.querySelectorAll("[data-transaction-select]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const id = String(checkbox.dataset.transactionSelect);
+      if (checkbox.checked) state.selectedTransactionIds.add(id);
+      else state.selectedTransactionIds.delete(id);
+      renderBulkUpdateToolbar(filterTransactions(state.allTransactions));
+    });
+  });
+
+  elements.transactions.querySelectorAll("[data-select-series]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const groupId = button.dataset.selectSeries;
+      state.allTransactions
+        .filter((item) => item.recurrenceGroupId === groupId && item.status !== "dismissed")
+        .forEach((item) => state.selectedTransactionIds.add(String(item.id)));
+      elements.transactions.querySelectorAll("[data-transaction-select]").forEach((checkbox) => {
+        checkbox.checked = state.selectedTransactionIds.has(String(checkbox.dataset.transactionSelect));
+      });
+      renderBulkUpdateToolbar(filterTransactions(state.allTransactions));
+    });
+  });
 
   elements.transactions.querySelectorAll("button[data-action='remove']").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -990,6 +1080,24 @@ function renderTransactions(transactions) {
       await loadState();
     });
   });
+}
+
+function renderBulkUpdateToolbar(filteredTransactions) {
+  const visibleIds = new Set(filteredTransactions.map((item) => String(item.id)));
+  const selectedVisible = [...visibleIds].filter((id) => state.selectedTransactionIds.has(id)).length;
+  const selectedWallet = elements.bulkAccountSelect.value || "__keep";
+  elements.selectVisibleTransactions.checked = visibleIds.size > 0 && selectedVisible === visibleIds.size;
+  elements.selectVisibleTransactions.indeterminate = selectedVisible > 0 && selectedVisible < visibleIds.size;
+  elements.bulkSelectionCount.textContent = `${state.selectedTransactionIds.size} selecionado(s)`;
+  elements.applyBulkUpdate.disabled = state.selectedTransactionIds.size === 0;
+  elements.bulkAccountSelect.innerHTML = [
+    `<option value="__keep">Manter atual</option>`,
+    `<option value="__none">Sem carteira</option>`,
+    ...state.wallets.map((wallet) => `<option value="${escapeAttribute(wallet.id)}">${escapeHtml(wallet.name)}</option>`)
+  ].join("");
+  if ([...elements.bulkAccountSelect.options].some((option) => option.value === selectedWallet)) {
+    elements.bulkAccountSelect.value = selectedWallet;
+  }
 }
 
 function filterTransactions(transactions) {
@@ -1011,6 +1119,11 @@ function filterTransactions(transactions) {
     if (normalizedCategory && normalizeText(transaction.category) !== normalizedCategory) return false;
     return true;
   });
+}
+
+function parseMoneyInput(value) {
+  const text = String(value || "").trim();
+  return text.includes(",") ? text.replace(/\./g, "").replace(",", ".") : text;
 }
 
 function renderLedgerFilterSummary(count) {

@@ -11,7 +11,7 @@
     <link rel="icon" type="image/png" href="/finup-favicon.png" />
     <link rel="apple-touch-icon" href="/finup-logo.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/styles.css?v=20261027-1" />
+    <link rel="stylesheet" href="/styles.css?v=20261028-1" />
   </head>
   <body>
     <section id="auth-screen" class="auth-screen">
@@ -193,6 +193,22 @@
               <input id="ledger-category-filter" list="category-options" placeholder="Todas" />
             </label>
           </div>
+          <form id="bulk-update-form" class="bulk-update-toolbar">
+            <label class="bulk-select-visible"><input id="select-visible-transactions" type="checkbox" /><span>Selecionar visíveis</span></label>
+            <span id="bulk-selection-count" class="bulk-selection-count">0 selecionados</span>
+            <label>
+              <span>Carteira</span>
+              <select id="bulk-account-select">
+                <option value="__keep">Manter atual</option>
+                <option value="__none">Sem carteira</option>
+              </select>
+            </label>
+            <label>
+              <span>Novo valor por lançamento</span>
+              <input id="bulk-amount" inputmode="decimal" placeholder="Ex.: 1.234,56" />
+            </label>
+            <button id="apply-bulk-update" type="submit" disabled>Aplicar alterações</button>
+          </form>
           <div id="transactions" class="transaction-list"></div>
         </aside>
 
@@ -287,6 +303,6 @@
       <option value="Outros"></option>
     </datalist>
 
-    <script src="/app.js?v=20261027-1" type="module"></script>
+    <script src="/app.js?v=20261028-1" type="module"></script>
   </body>
 </html>

@@ -59,6 +59,9 @@ export class MariaDbStorage {
          t.payment_method AS paymentMethod,
          CAST(t.account_id AS CHAR) AS accountId,
          a.name AS accountName,
+         t.recurrence_group_id AS recurrenceGroupId,
+         t.recurrence_index AS recurrenceIndex,
+         t.recurrence_total AS recurrenceTotal,
          t.transaction_date AS transactionDate,
          t.due_date AS dueDate,
          COALESCE(c.name, 'Outros') AS category,
@@ -127,14 +130,17 @@ export class MariaDbStorage {
     const categoryId = await this.ensureCategory(transaction.category, transaction.kind);
     const [result] = await this.pool.execute(
       `INSERT INTO transactions (
-         control_id, user_id, account_id, category_id, kind, status, amount, description, merchant, payment_method,
-         transaction_date, due_date, source, raw_text, confidence
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         control_id, user_id, account_id, category_id, recurrence_group_id, recurrence_index, recurrence_total,
+         kind, status, amount, description, merchant, payment_method, transaction_date, due_date, source, raw_text, confidence
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         this.controlId,
         this.userId,
         transaction.accountId || null,
         categoryId,
+        transaction.recurrenceGroupId || null,
+        transaction.recurrenceIndex || null,
+        transaction.recurrenceTotal || null,
         transaction.kind,
         transaction.status,
         transaction.amount,
@@ -168,6 +174,9 @@ export class MariaDbStorage {
          t.payment_method AS paymentMethod,
          CAST(t.account_id AS CHAR) AS accountId,
          a.name AS accountName,
+         t.recurrence_group_id AS recurrenceGroupId,
+         t.recurrence_index AS recurrenceIndex,
+         t.recurrence_total AS recurrenceTotal,
          t.transaction_date AS transactionDate,
          t.due_date AS dueDate,
          COALESCE(c.name, 'Outros') AS category,
@@ -226,6 +235,9 @@ export class MariaDbStorage {
          t.payment_method AS paymentMethod,
          CAST(t.account_id AS CHAR) AS accountId,
          a.name AS accountName,
+         t.recurrence_group_id AS recurrenceGroupId,
+         t.recurrence_index AS recurrenceIndex,
+         t.recurrence_total AS recurrenceTotal,
          t.transaction_date AS transactionDate,
          t.due_date AS dueDate,
          COALESCE(c.name, 'Outros') AS category,
@@ -241,6 +253,41 @@ export class MariaDbStorage {
       [id, this.userId, this.controlId]
     );
     return rows[0] ? normalizeTransaction(rows[0]) : null;
+  }
+
+  async bulkUpdateTransactions({ ids = [], recurrenceGroupId = null, accountId, amount }) {
+    const assignments = [];
+    const assignmentParams = [];
+    if (accountId !== undefined) {
+      assignments.push("account_id = ?");
+      assignmentParams.push(accountId || null);
+    }
+    if (amount !== undefined) {
+      assignments.push("amount = ?");
+      assignmentParams.push(amount);
+    }
+    if (!assignments.length) return 0;
+
+    let target;
+    const targetParams = [];
+    if (recurrenceGroupId) {
+      target = "recurrence_group_id = ?";
+      targetParams.push(recurrenceGroupId);
+    } else if (ids.length) {
+      target = `id IN (${ids.map(() => "?").join(",")})`;
+      targetParams.push(...ids);
+    } else {
+      return 0;
+    }
+    const scope = `${target} AND control_id = ? AND status <> 'dismissed'`;
+    const [matches] = await this.pool.execute(`SELECT COUNT(*) AS count FROM transactions WHERE ${scope}`, [...targetParams, this.controlId]);
+    const count = Number(matches[0]?.count || 0);
+    if (!count) return 0;
+    await this.pool.execute(
+      `UPDATE transactions SET ${assignments.join(", ")} WHERE ${scope}`,
+      [...assignmentParams, ...targetParams, this.controlId]
+    );
+    return count;
   }
 
   async addDocument(document) {
@@ -356,6 +403,9 @@ export class MariaDbStorage {
         control_id BIGINT UNSIGNED NULL,
         user_id BIGINT UNSIGNED NOT NULL,
         account_id BIGINT UNSIGNED NULL,
+        recurrence_group_id VARCHAR(64) NULL,
+        recurrence_index SMALLINT UNSIGNED NULL,
+        recurrence_total SMALLINT UNSIGNED NULL,
         category_id BIGINT UNSIGNED NULL,
         kind ENUM('income', 'expense', 'transfer') NOT NULL,
         status ENUM('confirmed', 'pending', 'paid', 'scheduled') NOT NULL DEFAULT 'confirmed',
@@ -415,10 +465,14 @@ export class MariaDbStorage {
     await this.addColumnIfMissing("categories", "control_id", "BIGINT UNSIGNED NULL AFTER id");
     await this.addColumnIfMissing("financial_accounts", "control_id", "BIGINT UNSIGNED NULL AFTER id");
     await this.addColumnIfMissing("transactions", "control_id", "BIGINT UNSIGNED NULL AFTER id");
+    await this.addColumnIfMissing("transactions", "recurrence_group_id", "VARCHAR(64) NULL AFTER account_id");
+    await this.addColumnIfMissing("transactions", "recurrence_index", "SMALLINT UNSIGNED NULL AFTER recurrence_group_id");
+    await this.addColumnIfMissing("transactions", "recurrence_total", "SMALLINT UNSIGNED NULL AFTER recurrence_index");
     await this.addColumnIfMissing("documents", "control_id", "BIGINT UNSIGNED NULL AFTER id");
     await this.addColumnIfMissing("chat_messages", "control_id", "BIGINT UNSIGNED NULL AFTER id");
     await this.migrateDefaultControl();
     await this.ensureCategoryUniqueIndex();
+    await this.backfillRecurringGroups();
   }
 
   async addColumnIfMissing(table, column, definition) {
@@ -480,6 +534,40 @@ export class MariaDbStorage {
       ) keeper ON keeper.control_id <=> c.control_id AND keeper.name = c.name AND keeper.kind = c.kind
       WHERE c.id <> keeper.keep_id
     `);
+  }
+
+  async backfillRecurringGroups() {
+    const [rows] = await this.pool.execute(`SELECT CAST(id AS CHAR) AS id, control_id AS controlId,
+        description, CAST(amount AS CHAR) AS amount, kind, category_id AS categoryId
+      FROM transactions
+      WHERE recurrence_group_id IS NULL AND description REGEXP ' [(][0-9]+/[0-9]+[)]$'
+      ORDER BY control_id, id`);
+    const groups = new Map();
+
+    for (const row of rows) {
+      const match = String(row.description).match(/^(.*) \((\d+)\/(\d+)\)$/);
+      if (!match) continue;
+      const [, description, indexText, totalText] = match;
+      const index = Number(indexText);
+      const total = Number(totalText);
+      if (total < 2 || total > 60 || index < 1 || index > total) continue;
+      const key = JSON.stringify([row.controlId, description, row.amount, row.kind, row.categoryId, total]);
+      const group = groups.get(key) || { rows: [], indexes: new Set(), total };
+      group.rows.push({ id: row.id, index });
+      group.indexes.add(index);
+      groups.set(key, group);
+    }
+
+    for (const group of groups.values()) {
+      if (group.rows.length !== group.total || group.indexes.size !== group.total) continue;
+      if (Array.from({ length: group.total }, (_, index) => index + 1).some((index) => !group.indexes.has(index))) continue;
+      const groupId = `legacy-${group.rows[0].id}`;
+      for (const row of group.rows) {
+        await this.pool.execute(`UPDATE transactions
+          SET recurrence_group_id = ?, recurrence_index = ?, recurrence_total = ?
+          WHERE id = ? AND recurrence_group_id IS NULL`, [groupId, row.index, group.total, row.id]);
+      }
+    }
   }
 
   async ensureDefaultUser() {

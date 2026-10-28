@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { loadEnv, hasDatabaseConfig } from "./config.js";
 import { JsonStorage } from "./storage.js";
 import { MariaDbStorage } from "./mariadb-storage.js";
-import { parseFinancialImage, parseFinancialMessage, summarizeTransaction, summarizeTransactions } from "./parser.js";
+import { extractRecurrenceCount, parseFinancialImage, parseFinancialMessage, summarizeTransaction, summarizeTransactions } from "./parser.js";
 import { runFinancialAssistant } from "./assistant.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -171,6 +171,23 @@ const server = createServer(async (request, response) => {
       return sendJson(response, await processFinancialMessage(message));
     }
 
+    if (request.method === "POST" && url.pathname === "/api/transactions/bulk-update") {
+      const body = await readJson(request);
+      let changes;
+      try {
+        changes = normalizeBulkTransactionChanges(body);
+      } catch (error) {
+        return sendJson(response, { error: error.message }, 400);
+      }
+      if (changes.accountId !== undefined && changes.accountId !== null && !(await walletBelongsToControl(changes.accountId, session.activeControlId))) {
+        return sendJson(response, { error: "Carteira inválida para este controle financeiro." }, 400);
+      }
+      const updated = await storage.bulkUpdateTransactions(changes);
+      if (!updated) return sendJson(response, { error: "Nenhum lançamento correspondente foi atualizado." }, 404);
+      await storage.addMessage({ role: "assistant", content: `Atualizei ${updated} lançamento(s) selecionado(s).` });
+      return sendJson(response, buildState(await storage.read()));
+    }
+
     if (request.method === "POST" && url.pathname.startsWith("/api/transactions/")) {
       const [, , , id, action] = url.pathname.split("/");
       if (!id || !["confirm", "dismiss", "remove", "update"].includes(action)) {
@@ -272,13 +289,17 @@ async function processFinancialMessage(message) {
   const assistantResult = await runFinancialAssistant({
     message,
     history: data.messages,
-    transactions: data.transactions
+    transactions: data.transactions,
+    wallets: data.wallets
   });
 
   let assistantContent;
-  if (assistantResult?.kind === "transactions") {
+  if (assistantResult?.kind === "update_transactions") {
+    assistantContent = await applyAssistantTransactionUpdate(assistantResult, data);
+  } else if (assistantResult?.kind === "transactions") {
     const saved = [];
-    for (const transaction of assistantResult.transactions) {
+    const groupedTransactions = attachRecurrenceGroup(assistantResult.transactions, message);
+    for (const transaction of groupedTransactions) {
       saved.push(await storage.addTransaction({ ...transaction, status: "pending" }));
     }
     assistantContent = saved.length > 1
@@ -289,7 +310,7 @@ async function processFinancialMessage(message) {
   } else {
     const parsed = await parseFinancialMessage(message);
     if (parsed.intent === "transaction") {
-      const transactions = parsed.transactions || [parsed.transaction];
+      const transactions = attachRecurrenceGroup(parsed.transactions || [parsed.transaction], message);
       const saved = [];
       for (const transaction of transactions) {
         saved.push(await storage.addTransaction({ ...transaction, status: "pending" }));
@@ -304,6 +325,75 @@ async function processFinancialMessage(message) {
 
   await storage.addMessage({ role: "assistant", content: assistantContent });
   return buildState(await storage.read());
+}
+
+function attachRecurrenceGroup(transactions, message) {
+  const recurrenceTotal = extractRecurrenceCount(message);
+  if (!recurrenceTotal || transactions.length !== recurrenceTotal) return transactions;
+  const recurrenceGroupId = crypto.randomUUID();
+  return transactions.map((transaction, index) => ({
+    ...transaction,
+    recurrenceGroupId,
+    recurrenceIndex: index + 1,
+    recurrenceTotal
+  }));
+}
+
+async function applyAssistantTransactionUpdate(result, data) {
+  const recurrenceGroupId = result.recurrenceGroupId ? String(result.recurrenceGroupId) : null;
+  const requestedIds = [...new Set((result.transactionIds || []).map(String))];
+  const activeTransactions = data.transactions.filter((item) => item.status !== "dismissed");
+  let targets;
+
+  if (recurrenceGroupId) {
+    targets = activeTransactions.filter((item) => item.recurrenceGroupId === recurrenceGroupId);
+  } else {
+    targets = activeTransactions.filter((item) => requestedIds.includes(String(item.id)));
+    if (targets.length !== requestedIds.length) {
+      return "Não consegui confirmar quais lançamentos você quer alterar. Tente especificar a descrição e a carteira.";
+    }
+  }
+
+  if (!targets.length) return "Não encontrei os lançamentos que você quer alterar nesse controle financeiro.";
+
+  let accountId;
+  if (result.accountName) {
+    const wanted = normalizeWalletName(result.accountName);
+    const matches = data.wallets.filter((wallet) => normalizeWalletName(wallet.name) === wanted);
+    if (matches.length !== 1) {
+      const names = data.wallets.map((wallet) => wallet.name).filter(Boolean).join(", ");
+      return matches.length
+        ? "Há mais de uma carteira com esse nome. Renomeie as carteiras para diferenciá-las antes de mover os lançamentos."
+        : `Não encontrei a carteira “${result.accountName}”. Carteiras disponíveis: ${names || "nenhuma cadastrada"}.`;
+    }
+    accountId = matches[0].id;
+  }
+
+  const amount = result.amount === null || result.amount === undefined ? undefined : Number(result.amount);
+  if (amount !== undefined && (!Number.isFinite(amount) || amount <= 0 || amount >= 1e12)) {
+    return "Não alterei os lançamentos porque o novo valor informado não é válido.";
+  }
+  if (accountId === undefined && amount === undefined) {
+    return "Entendi que você quer corrigir lançamentos, mas preciso saber a nova carteira ou o novo valor.";
+  }
+
+  await storage.bulkUpdateTransactions({
+    ids: targets.map((item) => String(item.id)),
+    recurrenceGroupId,
+    ...(accountId !== undefined ? { accountId } : {}),
+    ...(amount !== undefined ? { amount } : {})
+  });
+  const description = targets[0].description.replace(/\s+\(\d+\/\d+\)$/, "");
+  const adjustment = [accountId !== undefined ? `carteira ${data.wallets.find((wallet) => String(wallet.id) === String(accountId)).name}` : "", amount !== undefined ? `valor ${moneyLabel(amount)}` : ""].filter(Boolean).join(" e ");
+  return `Atualizei ${targets.length} lançamento(s) de “${description}” com ${adjustment}.`;
+}
+
+function normalizeWalletName(value) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLocaleLowerCase("pt-BR");
+}
+
+function moneyLabel(value) {
+  return Number(value).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
 async function transcribeAudio(file) {
@@ -573,6 +663,26 @@ function normalizeTransactionChanges(body) {
     dueDate: body.dueDate ? normalizeDate(body.dueDate) : null,
     category: String(body.category || "").trim() || (kind === "income" ? "Renda" : "Outros")
   };
+}
+
+function normalizeBulkTransactionChanges(body) {
+  const ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).map((id) => String(id).trim()).filter(Boolean))].slice(0, 100);
+  if ((Array.isArray(body.ids) ? body.ids.length : 0) > 100) throw new Error("Selecione no máximo 100 lançamentos por vez.");
+  const recurrenceGroupId = String(body.recurrenceGroupId || "").trim().slice(0, 64) || null;
+  if (!recurrenceGroupId && !ids.length) throw new Error("Selecione ao menos um lançamento.");
+
+  const changes = { ids, recurrenceGroupId };
+  if (Object.hasOwn(body, "accountId")) {
+    changes.accountId = body.accountId === null || body.accountId === "" ? null : String(body.accountId).trim();
+  }
+  if (Object.hasOwn(body, "amount")) {
+    const amountText = String(body.amount).trim();
+    const amount = Number(amountText.includes(",") ? amountText.replace(/\./g, "").replace(",", ".") : amountText);
+    if (!Number.isFinite(amount) || amount <= 0 || amount >= 1e12) throw new Error("Valor inválido.");
+    changes.amount = amount;
+  }
+  if (changes.accountId === undefined && changes.amount === undefined) throw new Error("Informe uma carteira ou um novo valor.");
+  return changes;
 }
 
 function normalizeDate(value) {

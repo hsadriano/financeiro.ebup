@@ -2,20 +2,22 @@ import { normalizeAssistantTransactions } from "./parser.js";
 
 const allowedStatuses = new Set(["confirmed", "paid", "scheduled"]);
 
-export async function runFinancialAssistant({ message, history, transactions, now = new Date() }) {
+export async function runFinancialAssistant({ message, history, transactions, wallets = [], now = new Date() }) {
   if (!process.env.OPENAI_API_KEY) return null;
 
   const baseUrl = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
   const model = process.env.OPENAI_CHAT_MODEL || "gpt-4.1-mini";
   const input = recentConversation(history, message);
   const tools = financialTools();
+  const queriedTransactionIds = new Set();
+  const queriedRecurrenceGroups = new Set();
 
   try {
     for (let turn = 0; turn < 4; turn += 1) {
       const payload = await createResponse(baseUrl, {
         model,
         store: false,
-        instructions: assistantInstructions(now),
+        instructions: assistantInstructions(now, wallets),
         input,
         tools,
         tool_choice: "auto",
@@ -42,11 +44,31 @@ export async function runFinancialAssistant({ message, history, transactions, no
         }
 
         if (call.name === "query_finances") {
+          const result = analyzeTransactions(transactions, args);
+          for (const item of result.items) {
+            queriedTransactionIds.add(item.id);
+            if (item.recurrence_group_id) queriedRecurrenceGroups.add(item.recurrence_group_id);
+          }
           input.push({
             type: "function_call_output",
             call_id: call.call_id,
-            output: JSON.stringify(analyzeTransactions(transactions, args))
+            output: JSON.stringify(result)
           });
+        }
+
+        if (call.name === "update_transactions") {
+          const transactionIds = Array.isArray(args.transaction_ids) ? args.transaction_ids.map(String).slice(0, 100) : [];
+          const recurrenceGroupId = args.recurrence_group_id || null;
+          if (recurrenceGroupId ? !queriedRecurrenceGroups.has(recurrenceGroupId) : !transactionIds.length || transactionIds.some((id) => !queriedTransactionIds.has(id))) {
+            return { kind: "answer", answer: "Não consegui localizar com segurança os lançamentos que você quer corrigir. Diga a descrição ou o nome da carteira para eu procurar." };
+          }
+          return {
+            kind: "update_transactions",
+            transactionIds,
+            recurrenceGroupId,
+            accountName: args.account_name || null,
+            amount: Number(args.amount) > 0 ? Number(args.amount) : null
+          };
         }
       }
     }
@@ -65,6 +87,7 @@ export function analyzeTransactions(transactions, filters = {}) {
   const endDate = isIsoDate(filters.end_date) ? filters.end_date : null;
   const category = normalizeFilter(filters.category);
   const search = normalizeFilter(filters.search);
+  const accountName = normalizeFilter(filters.account_name);
   const groupBy = ["none", "month", "category", "status"].includes(filters.group_by) ? filters.group_by : "none";
   const limit = Math.max(1, Math.min(50, Number(filters.limit) || 20));
 
@@ -73,6 +96,7 @@ export function analyzeTransactions(transactions, filters = {}) {
     .filter((item) => kind === "all" || item.kind === kind)
     .filter((item) => status === "all" || item.status === status)
     .filter((item) => !category || normalizeFilter(item.category) === category)
+    .filter((item) => !accountName || normalizeFilter(item.accountName) === accountName)
     .filter((item) => {
       if (!search) return true;
       return normalizeFilter([item.description, item.merchant, item.category].filter(Boolean).join(" ")).includes(search);
@@ -114,7 +138,9 @@ export function analyzeTransactions(transactions, filters = {}) {
       merchant: item.merchant || null,
       category: item.category,
       transaction_date: item.transactionDate,
-      due_date: item.dueDate || null
+      due_date: item.dueDate || null,
+      account_name: item.accountName || null,
+      recurrence_group_id: item.recurrenceGroupId || null
     })),
     truncated: filtered.length > limit
   };
@@ -133,8 +159,9 @@ function recentConversation(history, message) {
   return messages;
 }
 
-function assistantInstructions(now) {
+function assistantInstructions(now, wallets) {
   const today = now.toISOString().slice(0, 10);
+  const walletNames = [...new Set((wallets || []).map((wallet) => String(wallet.name || "").trim()).filter(Boolean))];
   return [
     "Você é o assistente financeiro pessoal do Finup e conversa em português do Brasil.",
     `Hoje é ${today}, no fuso America/Recife. Interprete datas relativas usando essa referência.`,
@@ -146,6 +173,9 @@ function assistantInstructions(now) {
     "Expressões como 'por 3 meses', '3 parcelas' ou '3x' são mensais: calcule a primeira data e avance um mês de calendário por ocorrência, preservando o dia quando possível.",
     "Uma conta futura deve ter dueDate e transactionDate na data informada. Uma compra já feita normalmente não tem dueDate.",
     "Use query_finances para responder qualquer pergunta sobre lançamentos, totais, períodos, categorias, comparações ou contas a pagar.",
+    "Para corrigir carteira ou valor de lançamentos existentes, consulte primeiro com query_finances e depois use update_transactions com os IDs retornados ou o recurrence_group_id da série.",
+    "Quando o usuário disser todos, série, parcelas, mensalidades ou recorrências, atualize o grupo inteiro; não altere apenas uma ocorrência.",
+    `Carteiras disponíveis neste controle: ${walletNames.length ? walletNames.join(", ") : "nenhuma"}. Ao mover, use o nome exato da carteira informado pelo usuário; se não estiver claro, pergunte antes.`,
     "Para contas a pagar use status scheduled e date_basis due. Para comparar meses, consulte o intervalo completo e agrupe por month.",
     "Não afirme que registrou algo antes de chamar propose_transactions. Os lançamentos propostos ainda serão confirmados pelo usuário.",
     "Responda de forma objetiva, amigável e fácil de ler no celular. Mostre valores em reais e datas em DD/MM/AAAA.",
@@ -206,10 +236,28 @@ function financialTools() {
           end_date: { type: ["string", "null"], format: "date" },
           category: nullableString,
           search: nullableString,
+          account_name: nullableString,
           group_by: { type: "string", enum: ["none", "month", "category", "status"] },
           limit: { type: "integer", minimum: 1, maximum: 50 }
         },
-        required: ["kind", "status", "date_basis", "start_date", "end_date", "category", "search", "group_by", "limit"],
+        required: ["kind", "status", "date_basis", "start_date", "end_date", "category", "search", "account_name", "group_by", "limit"],
+        additionalProperties: false
+      }
+    },
+    {
+      type: "function",
+      name: "update_transactions",
+      description: "Solicita a correção da carteira e/ou do valor de lançamentos existentes que já foram localizados por query_finances.",
+      strict: true,
+      parameters: {
+        type: "object",
+        properties: {
+          transaction_ids: { type: "array", items: { type: "string" }, maxItems: 100 },
+          recurrence_group_id: nullableString,
+          account_name: nullableString,
+          amount: { type: ["number", "null"] }
+        },
+        required: ["transaction_ids", "recurrence_group_id", "account_name", "amount"],
         additionalProperties: false
       }
     }

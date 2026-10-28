@@ -301,7 +301,8 @@ function expandRecurringTransactions(transaction, text) {
   });
 }
 
-function extractRecurrenceCount(text) {
+export function extractRecurrenceCount(text) {
+  text = normalizeText(text);
   const patterns = [
     /\bpor\s+(\d{1,2})\s+(?:mes|meses)\b/,
     /\bdurante\s+(\d{1,2})\s+(?:mes|meses)\b/,

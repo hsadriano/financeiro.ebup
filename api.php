@@ -164,6 +164,22 @@ try {
         respond(process_financial_message($pdo, $userId, $controlId, $message, $env));
     }
 
+    if ($method === 'POST' && $path === 'transactions/bulk-update') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        try {
+            $changes = normalize_bulk_transaction_changes($body);
+        } catch (Throwable $error) {
+            respond(['error' => $error->getMessage()], 400);
+        }
+        if (array_key_exists('accountId', $changes) && $changes['accountId'] !== null && !wallet_belongs_to_control($pdo, $changes['accountId'], $controlId)) {
+            respond(['error' => 'Carteira inválida para este controle financeiro.'], 400);
+        }
+        $updated = bulk_update_transactions($pdo, $controlId, $changes);
+        if (!$updated) respond(['error' => 'Nenhum lançamento correspondente foi atualizado.'], 404);
+        add_message($pdo, $userId, $controlId, 'assistant', "Atualizei {$updated} lançamento(s) selecionado(s).");
+        respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
+    }
+
     if ($method === 'POST' && preg_match('#^transactions/([^/]+)/(confirm|dismiss|remove|update)$#', $path, $matches)) {
         if ($matches[2] === 'update') {
             $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
@@ -524,6 +540,9 @@ function ensure_schema(PDO $pdo): void
         control_id BIGINT UNSIGNED NULL,
         user_id BIGINT UNSIGNED NOT NULL,
         account_id BIGINT UNSIGNED NULL,
+        recurrence_group_id VARCHAR(64) NULL,
+        recurrence_index SMALLINT UNSIGNED NULL,
+        recurrence_total SMALLINT UNSIGNED NULL,
         category_id BIGINT UNSIGNED NULL,
         kind ENUM('income', 'expense', 'transfer') NOT NULL,
         status ENUM('confirmed', 'pending', 'paid', 'scheduled', 'dismissed') NOT NULL DEFAULT 'confirmed',
@@ -571,10 +590,14 @@ function ensure_schema(PDO $pdo): void
     add_column_if_missing($pdo, 'categories', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
     add_column_if_missing($pdo, 'financial_accounts', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
     add_column_if_missing($pdo, 'transactions', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
+    add_column_if_missing($pdo, 'transactions', 'recurrence_group_id', 'VARCHAR(64) NULL AFTER account_id');
+    add_column_if_missing($pdo, 'transactions', 'recurrence_index', 'SMALLINT UNSIGNED NULL AFTER recurrence_group_id');
+    add_column_if_missing($pdo, 'transactions', 'recurrence_total', 'SMALLINT UNSIGNED NULL AFTER recurrence_index');
     add_column_if_missing($pdo, 'documents', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
     add_column_if_missing($pdo, 'chat_messages', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
     migrate_default_control($pdo);
     ensure_category_unique_index($pdo);
+    backfill_recurring_groups($pdo);
 }
 
 function add_column_if_missing(PDO $pdo, string $table, string $column, string $definition): void
@@ -658,6 +681,38 @@ function dedupe_categories(PDO $pdo): void
             GROUP BY control_id, name, kind
         ) keeper ON keeper.control_id <=> c.control_id AND keeper.name = c.name AND keeper.kind = c.kind
         WHERE c.id <> keeper.keep_id");
+}
+
+function backfill_recurring_groups(PDO $pdo): void
+{
+    $stmt = $pdo->query("SELECT CAST(id AS CHAR) AS id, control_id AS controlId, description,
+        CAST(amount AS CHAR) AS amount, kind, category_id AS categoryId
+        FROM transactions
+        WHERE recurrence_group_id IS NULL AND description REGEXP ' [(][0-9]+/[0-9]+[)]$'
+        ORDER BY control_id, id");
+    $groups = [];
+    foreach ($stmt->fetchAll() as $row) {
+        if (!preg_match('/^(.*) \((\d+)\/(\d+)\)$/', (string)$row['description'], $match)) continue;
+        $index = (int)$match[2];
+        $total = (int)$match[3];
+        if ($total < 2 || $total > 60 || $index < 1 || $index > $total) continue;
+        $key = json_encode([$row['controlId'], $match[1], $row['amount'], $row['kind'], $row['categoryId'], $total]);
+        $groups[$key] ??= ['rows' => [], 'indexes' => [], 'total' => $total];
+        $groups[$key]['rows'][] = ['id' => $row['id'], 'index' => $index];
+        $groups[$key]['indexes'][$index] = true;
+    }
+
+    $update = $pdo->prepare('UPDATE transactions SET recurrence_group_id = ?, recurrence_index = ?, recurrence_total = ? WHERE id = ? AND recurrence_group_id IS NULL');
+    foreach ($groups as $group) {
+        if (count($group['rows']) !== $group['total'] || count($group['indexes']) !== $group['total']) continue;
+        for ($index = 1; $index <= $group['total']; $index++) {
+            if (!isset($group['indexes'][$index])) continue 2;
+        }
+        $groupId = 'legacy-' . $group['rows'][0]['id'];
+        foreach ($group['rows'] as $row) {
+            $update->execute([$groupId, $row['index'], $group['total'], $row['id']]);
+        }
+    }
 }
 
 function ensure_welcome_message(PDO $pdo, int $userId, int $controlId): void
@@ -1069,6 +1124,9 @@ function read_data(PDO $pdo, int $userId, int $controlId): array
         t.payment_method AS paymentMethod,
         CAST(t.account_id AS CHAR) AS accountId,
         a.name AS accountName,
+        t.recurrence_group_id AS recurrenceGroupId,
+        t.recurrence_index AS recurrenceIndex,
+        t.recurrence_total AS recurrenceTotal,
         t.transaction_date AS transactionDate,
         t.due_date AS dueDate,
         COALESCE(c.name, 'Outros') AS category,
@@ -1115,13 +1173,16 @@ function add_transaction(PDO $pdo, int $userId, int $controlId, array $transacti
 {
     $categoryId = ensure_category($pdo, $userId, $controlId, $transaction['category'], $transaction['kind']);
     $stmt = $pdo->prepare('INSERT INTO transactions (
-        control_id, user_id, account_id, category_id, kind, status, amount, description, merchant, payment_method,
-        transaction_date, due_date, source, raw_text, confidence
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        control_id, user_id, account_id, recurrence_group_id, recurrence_index, recurrence_total, category_id, kind, status,
+        amount, description, merchant, payment_method, transaction_date, due_date, source, raw_text, confidence
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
     $stmt->execute([
         $controlId,
         $userId,
         $transaction['accountId'] ?? null,
+        $transaction['recurrenceGroupId'] ?? null,
+        $transaction['recurrenceIndex'] ?? null,
+        $transaction['recurrenceTotal'] ?? null,
         $categoryId,
         $transaction['kind'],
         $transaction['status'],
@@ -1138,6 +1199,64 @@ function add_transaction(PDO $pdo, int $userId, int $controlId, array $transacti
     $transaction['id'] = (string)$pdo->lastInsertId();
     $transaction['createdAt'] = gmdate('c');
     return $transaction;
+}
+
+function normalize_bulk_transaction_changes(array $body): array
+{
+    $ids = array_values(array_unique(array_filter(array_map(fn($id) => trim((string)$id), is_array($body['ids'] ?? null) ? $body['ids'] : []), fn($id) => $id !== '')));
+    if (count($ids) > 100) throw new RuntimeException('Selecione no máximo 100 lançamentos por vez.');
+    $ids = array_slice($ids, 0, 100);
+    $groupId = trim((string)($body['recurrenceGroupId'] ?? ''));
+    if ($groupId === '' && !$ids) throw new RuntimeException('Selecione ao menos um lançamento.');
+    $changes = ['ids' => $ids, 'recurrenceGroupId' => $groupId !== '' ? mb_substr($groupId, 0, 64) : null];
+
+    if (array_key_exists('accountId', $body)) {
+        $value = $body['accountId'];
+        $changes['accountId'] = $value === null || trim((string)$value) === '' ? null : trim((string)$value);
+    }
+    if (array_key_exists('amount', $body)) {
+        $amountText = trim((string)$body['amount']);
+        $amount = (float)(str_contains($amountText, ',') ? str_replace(',', '.', str_replace('.', '', $amountText)) : $amountText);
+        if (!is_finite($amount) || $amount <= 0 || $amount >= 1e12) throw new RuntimeException('Valor inválido.');
+        $changes['amount'] = $amount;
+    }
+    if (!array_key_exists('accountId', $changes) && !array_key_exists('amount', $changes)) {
+        throw new RuntimeException('Informe uma carteira ou um novo valor.');
+    }
+    return $changes;
+}
+
+function bulk_update_transactions(PDO $pdo, int $controlId, array $changes): int
+{
+    $assignments = [];
+    $assignmentParams = [];
+    if (array_key_exists('accountId', $changes)) {
+        $assignments[] = 'account_id = ?';
+        $assignmentParams[] = $changes['accountId'];
+    }
+    if (array_key_exists('amount', $changes)) {
+        $assignments[] = 'amount = ?';
+        $assignmentParams[] = $changes['amount'];
+    }
+    if (!$assignments) return 0;
+
+    if (!empty($changes['recurrenceGroupId'])) {
+        $target = 'recurrence_group_id = ?';
+        $targetParams = [$changes['recurrenceGroupId']];
+    } else {
+        $ids = $changes['ids'] ?? [];
+        if (!$ids) return 0;
+        $target = 'id IN (' . implode(',', array_fill(0, count($ids), '?')) . ')';
+        $targetParams = $ids;
+    }
+    $scope = $target . " AND control_id = ? AND status <> 'dismissed'";
+    $countStmt = $pdo->prepare('SELECT COUNT(*) FROM transactions WHERE ' . $scope);
+    $countStmt->execute([...$targetParams, $controlId]);
+    $count = (int)$countStmt->fetchColumn();
+    if (!$count) return 0;
+    $stmt = $pdo->prepare('UPDATE transactions SET ' . implode(', ', $assignments) . ' WHERE ' . $scope);
+    $stmt->execute([...$assignmentParams, ...$targetParams, $controlId]);
+    return $count;
 }
 
 function add_document(PDO $pdo, int $userId, int $controlId, array $document): void
@@ -1384,9 +1503,11 @@ function process_financial_message(PDO $pdo, int $userId, int $controlId, string
     $data = read_data($pdo, $userId, $controlId);
     $assistantResult = run_financial_assistant($message, $data, $env);
 
-    if (($assistantResult['kind'] ?? '') === 'transactions') {
+    if (($assistantResult['kind'] ?? '') === 'update_transactions') {
+        $assistant = apply_assistant_transaction_update($pdo, $controlId, $assistantResult, $data);
+    } elseif (($assistantResult['kind'] ?? '') === 'transactions') {
         $saved = [];
-        foreach ($assistantResult['transactions'] as $transaction) {
+        foreach (attach_recurrence_group($assistantResult['transactions'], $message) as $transaction) {
             $transaction['status'] = 'pending';
             $saved[] = add_transaction($pdo, $userId, $controlId, $transaction);
         }
@@ -1398,7 +1519,7 @@ function process_financial_message(PDO $pdo, int $userId, int $controlId, string
     } else {
         $parsed = parse_financial_message($message, $env);
         if ($parsed['intent'] === 'transaction') {
-            $transactions = $parsed['transactions'] ?? [$parsed['transaction']];
+            $transactions = attach_recurrence_group($parsed['transactions'] ?? [$parsed['transaction']], $message);
             $saved = [];
             foreach ($transactions as $transaction) {
                 $transaction['status'] = 'pending';
@@ -1417,6 +1538,64 @@ function process_financial_message(PDO $pdo, int $userId, int $controlId, string
         read_data($pdo, $userId, $controlId),
         session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])
     );
+}
+
+function attach_recurrence_group(array $transactions, string $message): array
+{
+    $total = extract_recurrence_count(normalize_text($message));
+    if (!$total || count($transactions) !== $total) return $transactions;
+    $groupId = bin2hex(random_bytes(16));
+    foreach ($transactions as $index => &$transaction) {
+        $transaction['recurrenceGroupId'] = $groupId;
+        $transaction['recurrenceIndex'] = $index + 1;
+        $transaction['recurrenceTotal'] = $total;
+    }
+    unset($transaction);
+    return $transactions;
+}
+
+function apply_assistant_transaction_update(PDO $pdo, int $controlId, array $result, array $data): string
+{
+    $groupId = trim((string)($result['recurrenceGroupId'] ?? ''));
+    $requestedIds = array_values(array_unique(array_map('strval', $result['transactionIds'] ?? [])));
+    $active = array_values(array_filter($data['transactions'] ?? [], fn($item) => ($item['status'] ?? '') !== 'dismissed'));
+    if ($groupId !== '') {
+        $targets = array_values(array_filter($active, fn($item) => (string)($item['recurrenceGroupId'] ?? '') === $groupId));
+    } else {
+        $targets = array_values(array_filter($active, fn($item) => in_array((string)$item['id'], $requestedIds, true)));
+        if (count($targets) !== count($requestedIds)) return 'Não consegui confirmar quais lançamentos você quer alterar. Tente especificar a descrição e a carteira.';
+    }
+    if (!$targets) return 'Não encontrei os lançamentos que você quer alterar nesse controle financeiro.';
+
+    $changes = ['ids' => array_map(fn($item) => (string)$item['id'], $targets), 'recurrenceGroupId' => $groupId ?: null];
+    $walletName = trim((string)($result['accountName'] ?? ''));
+    if ($walletName !== '') {
+        $wanted = normalize_assistant_filter($walletName);
+        $matches = array_values(array_filter($data['wallets'] ?? [], fn($wallet) => normalize_assistant_filter($wallet['name'] ?? '') === $wanted));
+        if (count($matches) !== 1) {
+            $names = implode(', ', array_map(fn($wallet) => $wallet['name'], $data['wallets'] ?? []));
+            return count($matches) > 1
+                ? 'Há mais de uma carteira com esse nome. Renomeie as carteiras para diferenciá-las antes de mover os lançamentos.'
+                : 'Não encontrei a carteira “' . $walletName . '”. Carteiras disponíveis: ' . ($names ?: 'nenhuma cadastrada') . '.';
+        }
+        $changes['accountId'] = $matches[0]['id'];
+    }
+    $amount = $result['amount'] ?? null;
+    if ($amount !== null) {
+        $amount = (float)$amount;
+        if (!is_finite($amount) || $amount <= 0 || $amount >= 1e12) return 'Não alterei os lançamentos porque o novo valor informado não é válido.';
+        $changes['amount'] = $amount;
+    }
+    if (!array_key_exists('accountId', $changes) && !array_key_exists('amount', $changes)) {
+        return 'Entendi que você quer corrigir lançamentos, mas preciso saber a nova carteira ou o novo valor.';
+    }
+
+    bulk_update_transactions($pdo, $controlId, $changes);
+    $description = preg_replace('/\s+\(\d+\/\d+\)$/', '', (string)$targets[0]['description']);
+    $adjustments = [];
+    if (isset($changes['accountId'])) $adjustments[] = 'carteira ' . $matches[0]['name'];
+    if (isset($changes['amount'])) $adjustments[] = 'valor ' . number_format($changes['amount'], 2, ',', '.');
+    return 'Atualizei ' . count($targets) . ' lançamento(s) de “' . $description . '” com ' . implode(' e ', $adjustments) . '.';
 }
 
 function transcribe_audio_with_openai(string $path, string $mimeType, string $filename, array $env): string
@@ -1468,13 +1647,15 @@ function run_financial_assistant(string $message, array $data, array $env): ?arr
     if (!$last || $last['role'] !== 'user' || $last['content'] !== $message) {
         $input[] = ['role' => 'user', 'content' => $message];
     }
+    $queriedTransactionIds = [];
+    $queriedRecurrenceGroups = [];
 
     try {
         for ($turn = 0; $turn < 4; $turn++) {
             $payload = openai_response_request($baseUrl, $apiKey, [
                 'model' => $model,
                 'store' => false,
-                'instructions' => financial_assistant_instructions(),
+                'instructions' => financial_assistant_instructions($data['wallets'] ?? []),
                 'input' => $input,
                 'tools' => financial_assistant_tools(),
                 'tool_choice' => 'auto',
@@ -1522,10 +1703,33 @@ function run_financial_assistant(string $message, array $data, array $env): ?arr
                 }
 
                 if (($call['name'] ?? '') === 'query_finances') {
+                    $queryResult = analyze_transactions_for_assistant($data['transactions'] ?? [], $args);
+                    foreach ($queryResult['items'] as $item) {
+                        $queriedTransactionIds[(string)$item['id']] = true;
+                        if (!empty($item['recurrence_group_id'])) $queriedRecurrenceGroups[(string)$item['recurrence_group_id']] = true;
+                    }
                     $input[] = [
                         'type' => 'function_call_output',
                         'call_id' => (string)$call['call_id'],
-                        'output' => json_encode(analyze_transactions_for_assistant($data['transactions'] ?? [], $args), JSON_UNESCAPED_UNICODE),
+                        'output' => json_encode($queryResult, JSON_UNESCAPED_UNICODE),
+                    ];
+                }
+
+                if (($call['name'] ?? '') === 'update_transactions') {
+                    $transactionIds = array_slice(array_map('strval', is_array($args['transaction_ids'] ?? null) ? $args['transaction_ids'] : []), 0, 100);
+                    $groupId = trim((string)($args['recurrence_group_id'] ?? ''));
+                    $authorized = $groupId !== ''
+                        ? isset($queriedRecurrenceGroups[$groupId])
+                        : ($transactionIds && !array_diff($transactionIds, array_keys($queriedTransactionIds)));
+                    if (!$authorized) {
+                        return ['kind' => 'answer', 'answer' => 'Não consegui localizar com segurança os lançamentos que você quer corrigir. Diga a descrição ou o nome da carteira para eu procurar.'];
+                    }
+                    return [
+                        'kind' => 'update_transactions',
+                        'transactionIds' => $transactionIds,
+                        'recurrenceGroupId' => $groupId ?: null,
+                        'accountName' => trim((string)($args['account_name'] ?? '')) ?: null,
+                        'amount' => isset($args['amount']) && is_numeric($args['amount']) ? (float)$args['amount'] : null,
                     ];
                 }
             }
@@ -1554,9 +1758,10 @@ function openai_response_request(string $baseUrl, string $apiKey, array $body): 
     return is_array($payload) ? $payload : null;
 }
 
-function financial_assistant_instructions(): string
+function financial_assistant_instructions(array $wallets = []): string
 {
     $today = date('Y-m-d');
+    $walletNames = array_values(array_unique(array_filter(array_map(fn($wallet) => trim((string)($wallet['name'] ?? '')), $wallets))));
     return "Você é o assistente financeiro pessoal do Finup e conversa em português do Brasil. "
         . "Hoje é {$today}, no fuso America/Recife. Interprete datas relativas usando essa referência. "
         . 'Use propose_transactions quando o usuário quiser registrar receitas, despesas, contas, parcelas ou recorrências. '
@@ -1567,6 +1772,9 @@ function financial_assistant_instructions(): string
         . "Expressões como por 3 meses, 3 parcelas ou 3x são mensais: calcule a primeira data e avance um mês de calendário por ocorrência, preservando o dia quando possível. "
         . 'Uma conta futura deve ter dueDate e transactionDate na data informada. Uma compra já feita normalmente não tem dueDate. '
         . 'Use query_finances para responder qualquer pergunta sobre lançamentos, totais, períodos, categorias, comparações ou contas a pagar. '
+        . 'Para corrigir carteira ou valor de lançamentos existentes, consulte primeiro com query_finances e depois use update_transactions com os IDs retornados ou o recurrence_group_id da série. '
+        . 'Quando o usuário disser todos, série, parcelas, mensalidades ou recorrências, atualize o grupo inteiro; não altere apenas uma ocorrência. '
+        . 'Carteiras disponíveis neste controle: ' . ($walletNames ? implode(', ', $walletNames) : 'nenhuma') . '. Ao mover, use o nome exato da carteira informado pelo usuário; se não estiver claro, pergunte antes. '
         . 'Para contas a pagar use status scheduled e date_basis due. Para comparar meses, consulte o intervalo completo e agrupe por month. '
         . 'Não afirme que registrou algo antes de chamar propose_transactions. Os lançamentos propostos ainda serão confirmados pelo usuário. '
         . 'Responda de forma objetiva, amigável e fácil de ler no celular. Mostre valores em reais e datas em DD/MM/AAAA. '
@@ -1614,11 +1822,26 @@ function financial_assistant_tools(): array
                     'date_basis' => ['type' => 'string', 'enum' => ['transaction', 'due', 'auto']],
                     'start_date' => ['type' => ['string', 'null'], 'format' => 'date'],
                     'end_date' => ['type' => ['string', 'null'], 'format' => 'date'],
-                    'category' => $nullableString, 'search' => $nullableString,
+                    'category' => $nullableString, 'search' => $nullableString, 'account_name' => $nullableString,
                     'group_by' => ['type' => 'string', 'enum' => ['none', 'month', 'category', 'status']],
                     'limit' => ['type' => 'integer', 'minimum' => 1, 'maximum' => 50],
                 ],
-                'required' => ['kind', 'status', 'date_basis', 'start_date', 'end_date', 'category', 'search', 'group_by', 'limit'],
+                'required' => ['kind', 'status', 'date_basis', 'start_date', 'end_date', 'category', 'search', 'account_name', 'group_by', 'limit'],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'type' => 'function', 'name' => 'update_transactions',
+            'description' => 'Solicita a correção da carteira e/ou do valor de lançamentos existentes que já foram localizados por query_finances.', 'strict' => true,
+            'parameters' => [
+                'type' => 'object',
+                'properties' => [
+                    'transaction_ids' => ['type' => 'array', 'items' => ['type' => 'string'], 'maxItems' => 100],
+                    'recurrence_group_id' => $nullableString,
+                    'account_name' => $nullableString,
+                    'amount' => ['type' => ['number', 'null']],
+                ],
+                'required' => ['transaction_ids', 'recurrence_group_id', 'account_name', 'amount'],
                 'additionalProperties' => false,
             ],
         ],
@@ -1646,14 +1869,16 @@ function analyze_transactions_for_assistant(array $transactions, array $filters)
     $endDate = is_iso_date((string)($filters['end_date'] ?? '')) ? (string)$filters['end_date'] : null;
     $category = normalize_assistant_filter($filters['category'] ?? null);
     $search = normalize_assistant_filter($filters['search'] ?? null);
+    $accountName = normalize_assistant_filter($filters['account_name'] ?? null);
     $groupBy = in_array($filters['group_by'] ?? '', ['none', 'month', 'category', 'status'], true) ? $filters['group_by'] : 'none';
     $limit = max(1, min(50, (int)($filters['limit'] ?? 20)));
 
-    $filtered = array_values(array_filter($transactions, function ($item) use ($kind, $status, $dateBasis, $startDate, $endDate, $category, $search) {
+    $filtered = array_values(array_filter($transactions, function ($item) use ($kind, $status, $dateBasis, $startDate, $endDate, $category, $search, $accountName) {
         if (!in_array($item['status'] ?? '', ['confirmed', 'paid', 'scheduled'], true)) return false;
         if ($kind !== 'all' && ($item['kind'] ?? '') !== $kind) return false;
         if ($status !== 'all' && ($item['status'] ?? '') !== $status) return false;
         if ($category !== '' && normalize_assistant_filter($item['category'] ?? '') !== $category) return false;
+        if ($accountName !== '' && normalize_assistant_filter($item['accountName'] ?? '') !== $accountName) return false;
         if ($search !== '') {
             $haystack = normalize_assistant_filter(implode(' ', array_filter([$item['description'] ?? '', $item['merchant'] ?? '', $item['category'] ?? ''])));
             if (!str_contains($haystack, $search)) return false;
@@ -1683,10 +1908,11 @@ function analyze_transactions_for_assistant(array $transactions, array $filters)
         'id' => (string)$item['id'], 'kind' => $item['kind'], 'status' => $item['status'], 'amount' => (float)$item['amount'],
         'description' => $item['description'], 'merchant' => $item['merchant'] ?: null, 'category' => $item['category'],
         'transaction_date' => $item['transactionDate'], 'due_date' => $item['dueDate'] ?: null,
+        'account_name' => $item['accountName'] ?: null, 'recurrence_group_id' => $item['recurrenceGroupId'] ?: null,
     ], array_slice($filtered, 0, $limit));
 
     return [
-        'filters' => ['kind' => $kind, 'status' => $status, 'date_basis' => $dateBasis, 'start_date' => $startDate, 'end_date' => $endDate, 'category' => $filters['category'] ?? null, 'search' => $filters['search'] ?? null, 'group_by' => $groupBy],
+        'filters' => ['kind' => $kind, 'status' => $status, 'date_basis' => $dateBasis, 'start_date' => $startDate, 'end_date' => $endDate, 'category' => $filters['category'] ?? null, 'search' => $filters['search'] ?? null, 'account_name' => $filters['account_name'] ?? null, 'group_by' => $groupBy],
         'summary' => ['count' => count($filtered), 'income' => $income, 'expenses' => $expenses, 'result' => round($income - $expenses, 2)],
         'groups' => $groups, 'items' => $items, 'truncated' => count($filtered) > $limit,
     ];
@@ -2255,6 +2481,8 @@ function normalize_transaction(array $row): array
     $row = normalize_dates($row);
     $row['amount'] = (float)$row['amount'];
     $row['confidence'] = (float)$row['confidence'];
+    $row['recurrenceIndex'] = $row['recurrenceIndex'] !== null ? (int)$row['recurrenceIndex'] : null;
+    $row['recurrenceTotal'] = $row['recurrenceTotal'] !== null ? (int)$row['recurrenceTotal'] : null;
     $row['transactionDate'] = substr((string)$row['transactionDate'], 0, 10);
     $row['dueDate'] = $row['dueDate'] ? substr((string)$row['dueDate'], 0, 10) : null;
     return $row;
