@@ -10,6 +10,7 @@ import { MariaDbStorage } from "./mariadb-storage.js";
 import { extractRecurrenceCount, parseFinancialImage, parseFinancialMessage, summarizeTransaction, summarizeTransactions } from "./parser.js";
 import { runFinancialAssistant } from "./assistant.js";
 import { monthlyOccurrences, normalizeTransactionInput, validDate } from "./transaction-input.js";
+import { captureKey, captureFingerprint } from "./capture-requests.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -39,7 +40,7 @@ const mimeTypes = {
   ".webmanifest": "application/manifest+json; charset=utf-8"
 };
 
-const server = createServer(async (request, response) => {
+const server = createServer((request, response) => runStorageContext(async () => {
   try {
     const url = new URL(request.url, `http://${request.headers.host}`);
 
@@ -94,6 +95,14 @@ const server = createServer(async (request, response) => {
       const controls = await listControls(session.userId);
       session.activeControlId = Number(controls[0]?.id || await createControl(session.userId, "Meu controle financeiro"));
       await setActiveControl(request, session.activeControlId);
+    }
+    const isCapture = request.method === "POST" && ["/api/chat", "/api/audio", "/api/upload", "/api/transactions"].includes(url.pathname);
+    if (isCapture && request.headers["idempotency-key"]) {
+      captureKey(request.headers["idempotency-key"]);
+      if (String(request.headers["x-finup-user-id"]) !== String(session.userId)) return sendJson(response, { error: "A conta conectada mudou. Entre novamente para retomar o envio." }, 409);
+      const controlId = Number(request.headers["x-finup-control-id"]);
+      if (!controlId || !(await userCanAccessControl(session.userId, controlId))) return sendJson(response, { error: "Este espaço não está disponível para sua conta." }, 403);
+      session.activeControlId = controlId;
     }
     storage.setContext(session.userId, session.activeControlId);
 
@@ -161,15 +170,17 @@ const server = createServer(async (request, response) => {
       const body = await readJson(request);
       const message = String(body.message || "").trim();
       if (!message) return sendJson(response, { error: "Mensagem vazia" }, 400);
-      return sendJson(response, await processFinancialMessage(message));
+      return sendJson(response, await runCapture(request, "chat", body, null, () => processFinancialMessage(message)));
     }
 
     if (request.method === "POST" && url.pathname === "/api/audio") {
       const file = await readMultipartFile(request, { fieldName: "audio", maxBytes: 10 * 1024 * 1024 });
       if (!file.mimeType.startsWith("audio/")) return sendJson(response, { error: "O arquivo enviado não é um áudio válido." }, 400);
-      const message = await transcribeAudio(file);
-      if (!message) return sendJson(response, { error: "Não consegui identificar fala nesse áudio." }, 422);
-      return sendJson(response, await processFinancialMessage(message));
+      return sendJson(response, await runCapture(request, "audio", {}, file, async () => {
+        const message = await transcribeAudio(file);
+        if (!message) throw Object.assign(new Error("Não consegui identificar fala nesse áudio."), { status: 422 });
+        return processFinancialMessage(message);
+      }));
     }
 
     if (request.method === "POST" && url.pathname === "/api/transactions") {
@@ -180,9 +191,11 @@ const server = createServer(async (request, response) => {
       if (transactions[0].accountId && !(await walletBelongsToControl(transactions[0].accountId, session.activeControlId))) {
         return sendJson(response, { error: "Carteira inválida para este espaço." }, 400);
       }
-      const transactionIds = [];
-      for (const transaction of transactions) transactionIds.push((await storage.addTransaction(transaction)).id);
-      return sendJson(response, { ...buildState(await storage.read()), capture: { transactionIds } });
+      return sendJson(response, await runCapture(request, "manual", body, null, async () => {
+        const transactionIds = [];
+        for (const transaction of transactions) transactionIds.push((await storage.addTransaction(transaction)).id);
+        return { ...buildState(await storage.read()), capture: { transactionIds } };
+      }));
     }
 
     if (request.method === "POST" && url.pathname === "/api/transactions/bulk-update") {
@@ -244,7 +257,9 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && url.pathname === "/api/upload") {
-      const file = await saveUpload(request, session.activeControlId);
+      const input = await readMultipartFile(request, { fieldName: "file", maxBytes: 20 * 1024 * 1024 });
+      return sendJson(response, await runCapture(request, "upload", {}, input, async () => {
+      const file = await saveUpload(input, session.activeControlId, captureKey(request.headers["idempotency-key"]));
       const document = await storage.addDocument({
         originalName: file.originalName,
         storedName: file.storedName,
@@ -273,7 +288,8 @@ const server = createServer(async (request, response) => {
         message += "O arquivo foi salvo, mas ainda não consigo ler este formato automaticamente.";
       }
       await storage.addMessage({ role: "assistant", content: message });
-      return sendJson(response, { ...buildState(await storage.read()), capture: { transactionIds, documentId: document.id } });
+      return { ...buildState(await storage.read()), capture: { transactionIds, documentId: document.id } };
+      }));
     }
 
     if (["GET", "HEAD"].includes(request.method) && !url.pathname.startsWith("/api/")) {
@@ -285,7 +301,18 @@ const server = createServer(async (request, response) => {
     console.error(error);
     sendJson(response, { error: error.message || "Erro interno" }, error.status || 500);
   }
-});
+}));
+
+function runStorageContext(action) {
+  return storage.runContext ? storage.runContext(action) : action();
+}
+
+async function runCapture(request, operation, body, file, action) {
+  return storage.captureRequest({
+    key: captureKey(request.headers["idempotency-key"]),
+    operation, fingerprint: captureFingerprint(operation, body, file)
+  }, action, async () => buildState(await storage.read()));
+}
 
 server.listen(port, host, () => {
   console.log(`Finance Assistant MVP running at http://${host}:${port}`);
@@ -703,11 +730,12 @@ async function readJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-async function saveUpload(request, controlId) {
-  const file = await readMultipartFile(request, { fieldName: "file", maxBytes: 20 * 1024 * 1024 });
+async function saveUpload(file, controlId, requestKey = null) {
   const { originalName, mimeType, buffer: content } = file;
   const extension = path.extname(originalName).replace(/[^a-zA-Z0-9.]/g, "") || ".bin";
-  const objectName = `controls/${controlId}/documents/${new Date().toISOString().slice(0, 10)}/${Date.now()}-${crypto.randomUUID()}${extension}`;
+  const objectName = requestKey
+    ? "controls/" + controlId + "/documents/requests/" + storage.userId + "-" + requestKey + extension
+    : `controls/${controlId}/documents/${new Date().toISOString().slice(0, 10)}/${Date.now()}-${crypto.randomUUID()}${extension}`;
   const localPath = path.join(uploadDir, objectName);
 
   await mkdir(path.dirname(localPath), { recursive: true });

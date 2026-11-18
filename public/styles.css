@@ -80,6 +80,10 @@ body:has(.app-shell:not([hidden])) { overflow: hidden; }
 .home-section:last-of-type { border-bottom: 0; }
 .notice-row { display: flex; width: 100%; text-align: left; justify-content: flex-start; padding: 12px; border: 0; color: var(--blue); background: var(--blue-soft); }
 .notice-row > span { flex: 1; }
+.local-notice { margin-bottom: 10px; background: #f0f2f6; color: #475875; }
+.local-attempt { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 8px; align-items: center; border-bottom: 1px solid var(--line); }
+.local-attempt .item-row { border: 0; }
+.local-attempt small { white-space: normal; }
 .notice-row strong, .notice-row small { display: block; }
 .notice-row small { color: var(--muted); font-weight: 400; margin-top: 2px; }
 .item-list { display: grid; }

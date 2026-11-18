@@ -67,6 +67,30 @@ somente a primeira ocorrência é realizada; as próximas ficam em aberto.
 Os ícones Lucide 0.468.0 são distribuídos localmente em `public/lucide.min.js`,
 preservando a licença do pacote e sem depender de CDN no celular.
 
+## Rascunhos e reenvio
+
+- Texto, mensagem do chat e formulário manual são recuperados do IndexedDB após reabrir o app e autenticar.
+- Cada usuário e espaço tem seus próprios rascunhos e envios; nenhuma senha ou chave de API é guardada nesse armazenamento.
+- Antes de transmitir, o app guarda a tentativa com um identificador único, inclusive o anexo ou áudio já finalizado.
+- Se a resposta falhar, a área **Neste aparelho** permite retomar explicitamente a mesma tentativa.
+- O servidor grava o recibo e as alterações financeiras na mesma transação InnoDB. Repetir uma tentativa concluída retorna o resultado anterior, sem chamar a IA novamente nem criar novos lançamentos.
+- Há limite de 20 tentativas por espaço e 50 MB de anexos locais. Navegadores sem IndexedDB mantêm dados somente na sessão e informam essa limitação.
+- Sair da conta solicita confirmação se houver dados locais e apaga as cópias daquele usuário. Remover uma tentativa local não remove dados já recebidos pelo servidor.
+
+Não há sincronização automática em segundo plano nem funcionamento completo sem rede
+ao abrir o app do zero. A retomada ocorre com o app aberto e a sessão autenticada.
+Limpar dados do navegador ou desinstalar o app pode apagar cópias ainda não enviadas.
+
+Para simular uma falha depois de processar o primeiro envio, sem tocar em dados reais:
+
+```bash
+PREVIEW_DROP_ONCE=1 pnpm run preview:ux
+```
+
+O PHP usa `finup_schema_versions` para executar a migração uma vez por versão e
+evitar DDL durante cada requisição. Toda mudança futura no schema deve atualizar
+a versão em `ensure_schema`, além do schema SQL e da inicialização Node.
+
 ## Banco de dados
 
 Configure o arquivo `.env`:
@@ -178,5 +202,6 @@ interpretação, captura isolada, recorrência, filtros, edição e contrato PHP
 
 Antes das lojas: testar câmera, microfone, teclado e safe areas em aparelhos físicos,
 adicionar consentimento de processamento por IA, exclusão de conta/dados e o pacote
-nativo. A captura offline com sincronização e idempotência entre reconexões ainda
-não está implementada; em falha de conexão, conferir Para revisar antes de reenviar.
+nativo. O reenvio com identificador e a recuperação de rascunhos já estão
+implementados. A abertura sem rede e a sincronização em segundo plano continuam
+como etapas futuras.

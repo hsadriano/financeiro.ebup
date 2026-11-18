@@ -20,6 +20,8 @@ const transactions = [
 const messages = [{ id: "welcome", role: "assistant", content: "Olá! O que você quer registrar ou consultar hoje?", createdAt }];
 const wallets = [{ id: "cash", name: "Dinheiro", type: "cash", balance: 120, openingBalance: 120 }, { id: "bank", name: "Conta principal", type: "checking", balance: 3000, openingBalance: 3000 }];
 let loggedIn = true;
+const receipts = new Map();
+let dropFirstCapture = process.env.PREVIEW_DROP_ONCE === "1";
 function state(capture) {
   const start = new Date(new Date().getFullYear(), new Date().getMonth() - 5, 1);
   const monthlySeries = Array.from({ length: 6 }, (_, index) => {
@@ -31,7 +33,20 @@ function state(capture) {
 const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
-  const json = (data, code = 200) => res.writeHead(code, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+  let receiptKey;
+  let fingerprint;
+  const json = (data, code = 200) => {
+    if (receiptKey && code === 200 && data.capture && !data.capture.replayed) {
+      data.capture = { ...data.capture, requestId: req.headers["idempotency-key"], messageId: url.pathname === "/api/transactions" ? null : data.messages.at(-1)?.id };
+      receipts.set(receiptKey, { fingerprint, capture: structuredClone(data.capture) });
+      if (dropFirstCapture) {
+        dropFirstCapture = false;
+        res.writeHead(502, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Resposta perdida na simulação de conexão." }));
+        return;
+      }
+    }
+    return res.writeHead(code, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+  };
   try {
     if (!url.pathname.startsWith("/api/")) {
       const file = path.resolve(root, "." + (url.pathname === "/" ? "/index.html" : url.pathname));
@@ -41,6 +56,15 @@ const server = createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = chunks.length && req.headers["content-type"]?.includes("application/json") ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+    if (req.headers["idempotency-key"] && ["/api/transactions", "/api/chat"].includes(url.pathname)) {
+      receiptKey = [req.headers["x-finup-user-id"], req.headers["x-finup-control-id"], req.headers["idempotency-key"]].join(":");
+      fingerprint = crypto.createHash("sha256").update(url.pathname + JSON.stringify(body)).digest("hex");
+      const previous = receipts.get(receiptKey);
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) return json({ error: "Este identificador pertence a outro envio." }, 409);
+        return json(state({ ...previous.capture, replayed: true }));
+      }
+    }
     if (url.pathname === "/api/session") return json(loggedIn ? session : { user: null });
     if (url.pathname.startsWith("/api/auth/")) { loggedIn = !url.pathname.endsWith("/logout"); return json(session); }
     if (url.pathname === "/api/state") return json(state());

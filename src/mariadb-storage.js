@@ -1,3 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { executeCapture } from "./capture-requests.js";
+
 const defaultUser = {
   name: "Usuario principal",
   email: "usuario@local"
@@ -8,10 +11,38 @@ const welcomeMessage =
 
 export class MariaDbStorage {
   constructor(config) {
+    this.requestContext = new AsyncLocalStorage();
     this.config = config;
     this.pool = null;
     this.userId = null;
     this.controlId = null;
+  }
+
+  get pool() { return this.requestContext.getStore()?.pool ?? this.defaultPool; }
+  set pool(value) { this.defaultPool = value; }
+  get userId() { return this.requestContext.getStore()?.userId ?? this.defaultUserId; }
+  set userId(value) {
+    const context = this.requestContext.getStore();
+    if (context) context.userId = value;
+    else this.defaultUserId = value;
+  }
+  get controlId() { return this.requestContext.getStore()?.controlId ?? this.defaultControlId; }
+  set controlId(value) {
+    const context = this.requestContext.getStore();
+    if (context) context.controlId = value;
+    else this.defaultControlId = value;
+  }
+
+  runContext(action) {
+    return this.requestContext.run({ userId: this.userId, controlId: this.controlId, pool: this.pool }, action);
+  }
+
+  async captureRequest(input, action, replay) {
+    const connection = await this.pool.getConnection();
+    const context = { userId: this.userId, controlId: this.controlId, pool: connection };
+    try {
+      return await this.requestContext.run(context, () => executeCapture(connection, { ...input, userId: context.userId, controlId: context.controlId }, action, replay));
+    } finally { connection.release(); }
   }
 
   async init() {
@@ -318,6 +349,16 @@ export class MariaDbStorage {
   }
 
   async ensureSchema() {
+    await this.pool.execute(`CREATE TABLE IF NOT EXISTS capture_requests (
+      user_id BIGINT UNSIGNED NOT NULL,
+      control_id BIGINT UNSIGNED NOT NULL,
+      request_key VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+      operation VARCHAR(20) NOT NULL,
+      fingerprint CHAR(64) CHARACTER SET ascii NOT NULL,
+      capture_data LONGTEXT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, control_id, request_key)
+    ) ENGINE=InnoDB`);
     await this.pool.execute(`
       CREATE TABLE IF NOT EXISTS users (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,

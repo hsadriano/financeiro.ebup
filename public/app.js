@@ -1,4 +1,5 @@
 import { localDate, groupDrafts, captureDrafts, seriesTargets, filterLedger, settledTotals } from "/ui-model.js?v=20261118-1";
+import { LocalCaptures, localContext, attemptBody, remainingDraft } from "/local-captures.js?v=20261118-2";
 
 const $ = (id) => document.getElementById(id);
 const all = (selector) => [...document.querySelectorAll(selector)];
@@ -19,25 +20,39 @@ const state = {
 let toastTimer;
 let toastUndo;
 let audioRequest = 0;
+const localCaptures = new LocalCaptures();
+state.localKey = null;
+state.localReady = Promise.resolve();
+state.draftWrites = Promise.resolve();
 
-async function request(url, body, multipart = false) {
+async function request(url, body, multipart = false, attempt = null) {
   let response;
+  const headers = multipart ? {} : { "Content-Type": "application/json" };
+  if (attempt) {
+    const [userId, controlId] = attempt.context.split(":").map(decodeURIComponent);
+    Object.assign(headers, { "Idempotency-Key": attempt.id, "X-Finup-User-Id": userId, "X-Finup-Control-Id": controlId });
+  }
+  const controller = attempt ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 90000) : null;
   try {
     response = await fetch(url, body === undefined ? {} : {
-      method: "POST", headers: multipart ? {} : { "Content-Type": "application/json" },
-      body: multipart ? body : JSON.stringify(body)
+      method: "POST", headers,
+      body: multipart ? body : JSON.stringify(body), signal: controller?.signal
     });
   } catch {
-    throw new Error("Conexão interrompida. Confira os itens para revisar antes de enviar novamente.");
+    if (timer) clearTimeout(timer);
+    throw Object.assign(new Error("Conexão interrompida. O envio não foi confirmado."), { retryable: true });
   }
-  const data = await response.json().catch(() => ({}));
+  const data = await response.json()
+    .catch(() => { throw Object.assign(new Error("Não recebi uma confirmação válida do servidor."), { retryable: true }); })
+    .finally(() => { if (timer) clearTimeout(timer); });
   if (response.status === 401 && !url.includes("/auth/")) {
     showAuth();
-    throw new Error("Sua sessão terminou. Entre novamente.");
+    throw Object.assign(new Error("Sua sessão terminou. Entre novamente."), { retryable: true });
   }
-  if (!response.ok) throw new Error(data.error === "Erro interno"
+  if (!response.ok) throw Object.assign(new Error(data.error === "Erro interno"
     ? "Não foi possível concluir agora. Seus dados já salvos continuam disponíveis."
-    : data.error || "Não foi possível concluir. Tente novamente.");
+    : data.error || "Não foi possível concluir. Tente novamente."), { retryable: response.status >= 500 || [401, 403, 408, 409, 429].includes(response.status) });
   return data;
 }
 
@@ -80,6 +95,7 @@ function openPanel(name) {
   if (!state.data) { toast("Carregue o espaço financeiro antes de continuar."); return; }
   if (name !== state.panel) state.back = state.panel;
   state.panel = name;
+  if (name === "device") refreshLocalNotice();
   all("[data-panel]").forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === name));
   all("[data-tab]").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.tab === name);
@@ -91,7 +107,7 @@ function openPanel(name) {
 }
 all("[data-open]").forEach((button) => { button.onclick = () => openPanel(button.dataset.open); });
 all("[data-tab]").forEach((button) => { button.onclick = () => openPanel(button.dataset.tab); });
-all("[data-back]").forEach((button) => { button.onclick = () => openPanel(["pending", "files", "reports", "settings"].includes(state.back) ? "home" : state.back); });
+all("[data-back]").forEach((button) => { button.onclick = () => openPanel(["pending", "files", "reports", "settings", "device"].includes(state.back) ? "home" : state.back); });
 $("profile-button").onclick = () => openPanel("settings");
 
 function openSheet(id) {
@@ -111,6 +127,109 @@ all("dialog").forEach((dialog) => {
 function activeSpace() {
   return state.session?.controls?.find((control) => String(control.id) === String(state.session.activeControlId))?.name || "Meu espaço";
 }
+function currentLocalContext() {
+  return state.session?.user ? localContext(state.session.user.id, state.session.activeControlId) : null;
+}
+function draftSnapshot() {
+  return {
+    context: currentLocalContext(), updatedAt: Date.now(),
+    text: $("capture-text").value, chatText: $("message-input").value,
+    manual: Object.fromEntries(new FormData($("manual-form"))), manualOpen: !$("manual-form").hidden
+  };
+}
+function hasDraft(draft) {
+  return Boolean(draft && (draft.text?.trim() || draft.chatText?.trim() || draft.manual?.amount?.trim() || draft.manual?.description?.trim()));
+}
+async function activateLocalContext(context) {
+  state.localKey = context;
+  $("capture-text").value = ""; $("message-input").value = ""; $("manual-form").reset();
+  $("manual-form").hidden = true; $("capture-text-form").hidden = false;
+  $("draft-status").hidden = true;
+  try {
+    const draft = await localCaptures.draft(context);
+    if (currentLocalContext() !== context) return;
+    if (draft) {
+      $("capture-text").value = draft.text || ""; $("message-input").value = draft.chatText || "";
+      $("manual-form").elements.accountId.innerHTML = wallets(draft.manual?.accountId);
+      for (const [name, value] of Object.entries(draft.manual || {})) if ($("manual-form").elements[name]) $("manual-form").elements[name].value = value;
+      $("manual-form").hidden = !draft.manualOpen; $("capture-text-form").hidden = Boolean(draft.manualOpen);
+      $("manual-date-label").textContent = draft.manual?.paymentState === "scheduled" ? "Vencimento" : "Data";
+      $("draft-status").textContent = localCaptures.persistent ? "Rascunho salvo neste aparelho" : "Rascunho mantido somente nesta sessão";
+      $("draft-status").hidden = !hasDraft(draft);
+    }
+    await refreshLocalNotice();
+  } catch (error) { toast(error.message); }
+}
+function persistDraft(strict = false) {
+  if (!currentLocalContext() || state.localKey !== currentLocalContext()) return Promise.resolve();
+  const snapshot = draftSnapshot();
+  state.draftWrites = state.draftWrites.catch(() => {}).then(async () => {
+    if (hasDraft(snapshot)) await localCaptures.put("drafts", snapshot);
+    else await localCaptures.remove("drafts", snapshot.context);
+    if (currentLocalContext() !== snapshot.context) return;
+    $("draft-status").textContent = localCaptures.persistent ? "Rascunho salvo neste aparelho" : "Rascunho mantido somente nesta sessão";
+    $("draft-status").hidden = !hasDraft(snapshot);
+    await refreshLocalNotice();
+  });
+  return state.draftWrites.catch((error) => { feedback("draft-status", error.message, true); if (strict === true) throw error; });
+}
+async function refreshLocalNotice() {
+  const context = currentLocalContext();
+  if (!context) return;
+  try {
+    const pending = await localCaptures.pending(context);
+    const draft = remainingDraft(await localCaptures.draft(context), pending);
+    if (context !== currentLocalContext()) return;
+    $("device-notice").hidden = !pending.length && !hasDraft(draft);
+    $("device-count").textContent = pending.length ? pending.length + (pending.length === 1 ? " envio guardado" : " envios guardados") : "Rascunho neste aparelho";
+    $("device-caption").textContent = localCaptures.persistent ? "Retomar sem duplicar o envio" : "Disponível apenas nesta sessão";
+    $("device-space").textContent = activeSpace();
+    $("device-draft").innerHTML = hasDraft(draft) ? '<div class="local-attempt"><button type="button" class="item-row" data-resume-draft><span class="row-symbol">' + icon("pencil") + '</span><span class="item-main"><strong>Rascunho não enviado</strong><small>' + escape(draft.text || draft.chatText || draft.manual?.description || "Registro manual") + '</small></span>' + icon("chevron-right") + '</button><button type="button" class="icon-button danger" data-remove-draft title="Descartar rascunho local" aria-label="Descartar rascunho local">' + icon("trash-2") + "</button></div>" : "";
+    $("device-outbox").innerHTML = pending.map((item) => '<div class="local-attempt"><button type="button" class="item-row" data-resume-attempt="' + escape(item.id) + '"><span class="row-symbol review">' + icon(item.multipart ? "paperclip" : "refresh-cw") + '</span><span class="item-main"><strong>' + escape(item.label || "Registro") + '</strong><small>' + (item.attempted ? "Recebimento não confirmado" : "Aguardando envio") + '</small></span>' + icon("arrow-right") + '</button><button class="icon-button danger" type="button" data-remove-attempt="' + escape(item.id) + '" title="Remover envio local" aria-label="Remover envio local">' + icon("trash-2") + "</button></div>").join("") || (!hasDraft(draft) ? '<p class="empty">Nenhum rascunho ou envio neste aparelho.</p>' : "");
+    icons();
+  } catch (error) { toast(error.message); }
+}
+async function clearAttemptDraft(attempt) {
+  if (attempt.context !== currentLocalContext()) return;
+  if (attempt.url === "/api/chat") {
+    const input = $(attempt.origin === "chat" ? "message-input" : "capture-text");
+    if (input.value.trim() === attempt.payload.message) input.value = "";
+  } else if (attempt.url === "/api/transactions") {
+    const form = $("manual-form");
+    if (Object.entries(Object.fromEntries(new FormData(form))).every(([key, value]) => String(attempt.payload[key] ?? "") === value)) {
+      form.reset(); form.hidden = true; $("capture-text-form").hidden = false;
+    }
+  }
+  await persistDraft(true);
+}
+async function transmitAttempt(attempt) {
+  if (attempt.context !== currentLocalContext()) throw new Error("Troque para o espaço deste envio antes de retomá-lo.");
+  try {
+    if (!navigator.onLine) throw Object.assign(new Error("Sem conexão."), { retryable: true });
+    attempt.attempted = true;
+    await localCaptures.put("outbox", attempt);
+    const result = await request(attempt.url, attemptBody(attempt), attempt.multipart, attempt);
+    render(result);
+    attempt.completed = true;
+    await localCaptures.put("outbox", attempt);
+    await clearAttemptDraft(attempt);
+    await localCaptures.remove("outbox", attempt.id);
+    await refreshLocalNotice();
+    return result;
+  } catch (error) {
+    if (error.retryable === false) await localCaptures.remove("outbox", attempt.id);
+    await refreshLocalNotice();
+    if (error.retryable !== false) {
+      $("capture-local-retry").hidden = false;
+      throw new Error((localCaptures.persistent ? "Envio guardado neste aparelho." : "Envio mantido nesta sessão.") + " Retome em “Neste aparelho”; a mesma tentativa não cria outro lançamento.");
+    }
+    throw error;
+  }
+}
+$("capture-text").addEventListener("input", persistDraft);
+$("message-input").addEventListener("input", persistDraft);
+$("manual-form").addEventListener("input", persistDraft);
+$("capture-local-retry").onclick = () => { $("capture-dialog").close(); openPanel("device"); };
 function wallets(selected, first = "Sem carteira") {
   return '<option value="">' + first + "</option>" + (state.data?.wallets || []).map((wallet) =>
     '<option value="' + escape(wallet.id) + '"' + (String(selected || "") === String(wallet.id) ? " selected" : "") + ">" + escape(wallet.name) + "</option>").join("");
@@ -157,6 +276,9 @@ function render(data) {
   renderReports();
   renderDocuments();
   renderWallets();
+  const context = currentLocalContext();
+  if (context && state.localKey !== context) state.localReady = activateLocalContext(context);
+  else refreshLocalNotice();
   icons();
 }
 
@@ -226,6 +348,31 @@ function renderWallets() {
 }
 
 document.addEventListener("click", (event) => {
+  const resume = event.target.closest("[data-resume-attempt]");
+  const removeAttempt = event.target.closest("[data-remove-attempt]");
+  if (resume && !state.busy) {
+    localCaptures.pending(currentLocalContext()).then((pending) => {
+      const attempt = pending.find((item) => item.id === resume.dataset.resumeAttempt);
+      if (!attempt) return;
+      if (attempt.origin === "chat") { openPanel("chat"); sendChat(attempt.payload.message, attempt); }
+      else captureRequest(attempt.url, attemptBody(attempt), "Retomando seu envio…", attempt.multipart, attempt);
+    }).catch((error) => toast(error.message));
+  }
+  if (removeAttempt && !state.busy && confirm("Remover esta tentativa do aparelho? Isso não exclui lançamentos que o servidor já possa ter recebido.")) {
+    task(async () => { await localCaptures.remove("outbox", removeAttempt.dataset.removeAttempt); await refreshLocalNotice(); });
+  }
+  if (event.target.closest("[data-resume-draft]")) {
+    if ($("message-input").value && !$("capture-text").value && !$("manual-form").elements.amount.value && !$("manual-form").elements.description.value) openPanel("chat");
+    else openCapture();
+  }
+  if (event.target.closest("[data-remove-draft]") && !state.busy && confirm("Descartar o rascunho deste aparelho? Nenhum lançamento salvo no servidor será removido.")) {
+    task(async () => {
+      await state.draftWrites.catch(() => {});
+      await localCaptures.remove("drafts", currentLocalContext());
+      state.localReady = activateLocalContext(currentLocalContext());
+      await state.localReady;
+    });
+  }
   const more = event.target.closest("[data-more]");
   if (more) {
     if (more.dataset.more === "ledger") { state.ledgerLimit += 50; renderLedger(); }
@@ -272,20 +419,25 @@ $("clear-filters").onclick = () => { state.filters = { kind: "all", period: "cur
 $("selection-toggle").onclick = () => { state.selecting = !state.selecting; state.selected.clear(); renderLedger(); };
 $("bulk-edit").onclick = () => openBulk();
 
-function openCapture() {
+async function openCapture() {
   if (!state.data) { toast("Carregue o espaço financeiro antes de registrar."); return; }
   if (state.busy || state.audio || state.audioStarting) return;
-  if (captureDrafts(state.data, state.captureIds).length) { showCapture(state.captureIds); return; }
+  const context = currentLocalContext();
+  await state.localReady;
+  if (state.busy || context !== currentLocalContext()) return false;
+  if (captureDrafts(state.data, state.captureIds).length) { showCapture(state.captureIds); return false; }
   state.captureIds = [];
   $("capture-title").textContent = "Registrar";
   $("capture-space").textContent = activeSpace();
   $("capture-entry").hidden = false;
   $("capture-result").hidden = true;
   $("capture-error").hidden = true;
+  $("capture-local-retry").hidden = true;
   $("capture-progress").hidden = true;
   $("manual-form").elements.transactionDate.value ||= localDate();
   $("manual-form").elements.accountId.innerHTML = wallets($("manual-form").elements.accountId.value);
   openSheet("capture-dialog");
+  return true;
 }
 $("register-button").onclick = openCapture;
 $("capture-dialog").addEventListener("close", () => { state.captureIds = []; });
@@ -293,6 +445,7 @@ $("manual-toggle").onclick = () => {
   $("manual-form").hidden = !$("manual-form").hidden;
   $("capture-text-form").hidden = !$("manual-form").hidden;
   if (!$("manual-form").hidden) $("manual-form").elements.amount.focus();
+  persistDraft();
 };
 $("manual-form").elements.paymentState.onchange = () => { $("manual-date-label").textContent = $("manual-form").elements.paymentState.value === "scheduled" ? "Vencimento" : "Data"; };
 function captureProgress(text) {
@@ -300,27 +453,33 @@ function captureProgress(text) {
   $("capture-progress").hidden = false; $("capture-progress-text").textContent = text;
   $("capture-error").hidden = true;
 }
-async function captureRequest(url, body, progress, multipart = false) {
-  openCapture();
+async function captureRequest(url, body, progress, multipart = false, savedAttempt = null) {
+  if (state.busy || state.audio || state.audioStarting || state.captureStarting) return;
+  state.captureStarting = true;
+  try {
+  if (!(await openCapture())) return;
   await task(async () => {
     captureProgress(progress);
     try {
-      const data = await request(url, body, multipart);
+      const label = multipart ? body.get(url === "/api/audio" ? "audio" : "file")?.name : body.description || body.message;
+      const attempt = savedAttempt || await localCaptures.enqueue(currentLocalContext(), url, body, multipart, label || "Registro");
+      const data = await transmitAttempt(attempt);
       const ids = data.capture?.transactionIds || [];
-      const last = data.messages?.at(-1);
+      const last = data.messages?.find((message) => String(message.id) === String(data.capture?.messageId));
       if (last?.role === "assistant" && ids.length) state.chatDrafts.set(String(last.id), ids);
-      render(data);
-      if (ids.length) {
-        if (url === "/api/chat") $("capture-text").value = "";
+      if (captureDrafts(data, ids).length) {
         showCapture(ids);
+      } else if (ids.length && data.capture?.replayed) {
+        $("capture-dialog").close(); toast("Este envio já foi processado. Nenhum lançamento foi duplicado.");
       } else {
         $("capture-entry").hidden = false;
-        const message = data.messages?.at(-1)?.content || "Não encontrei um lançamento. Informe o valor e a descrição, ou use o registro manual.";
+        const message = last?.content || "Não encontrei um lançamento. Informe o valor e a descrição, ou use o registro manual.";
         feedback("capture-error", message);
       }
     } finally { $("capture-progress").hidden = true; }
   }, "capture-error");
   if (!state.captureIds.length) $("capture-entry").hidden = false;
+  } finally { state.captureStarting = false; }
 }
 $("capture-text-form").onsubmit = (event) => {
   event.preventDefault();
@@ -487,19 +646,21 @@ $("bulk-form").onsubmit = (event) => {
 };
 
 $("chat-form").onsubmit = (event) => { event.preventDefault(); sendChat($("message-input").value.trim()); };
-async function sendChat(message) {
-  if (!message) return;
+async function sendChat(message, savedAttempt = null) {
+  if (!message || state.busy) return;
   await task(async () => {
     $("message-input").setAttribute("aria-busy", "true");
     $("messages").insertAdjacentHTML("beforeend", '<article id="chat-working" class="message assistant" role="status">' + icon("loader-circle") + " Consultando…</article>");
     icons(); $("messages").scrollTop = $("messages").scrollHeight;
     try {
-      const data = await request("/api/chat", { message });
+      const attempt = savedAttempt || await localCaptures.enqueue(currentLocalContext(), "/api/chat", { message }, false, message, "chat");
+      const data = await transmitAttempt(attempt);
       const ids = data.capture?.transactionIds || [];
-      if (ids.length) state.chatDrafts.set(String(data.messages.at(-1).id), ids);
-      render(data); $("message-input").value = "";
+      if (ids.length && data.capture?.messageId) state.chatDrafts.set(String(data.capture.messageId), ids);
+      renderMessages(); icons();
       $("messages").scrollTop = $("messages").scrollHeight;
-      if (ids.length) showCapture(ids);
+      if (captureDrafts(data, ids).length) showCapture(ids);
+      else if (ids.length && data.capture?.replayed) toast("Este envio já foi processado. Nenhum lançamento foi duplicado.");
     } finally { $("message-input").removeAttribute("aria-busy"); $("chat-working")?.remove(); }
   });
 }
@@ -571,7 +732,7 @@ $("control-select").onchange = () => task(async () => {
   await loadActiveState(); openPanel("home");
 });
 async function loadActiveState() {
-  try { render(await request("/api/state")); }
+  try { render(await request("/api/state")); await state.localReady; }
   catch (error) {
     state.data = null;
     all("[data-panel]").forEach((panel) => { panel.inert = true; });
@@ -613,7 +774,22 @@ $("wallet-list").addEventListener("click", (event) => {
   if (!button || !confirm("Remover esta carteira? Os lançamentos serão mantidos sem carteira.")) return;
   task(async () => { render(await request("/api/settings/wallets/" + encodeURIComponent(button.dataset.removeWallet) + "/remove", {})); feedback("settings-feedback", "Carteira removida."); }, "settings-feedback");
 });
-$("logout-button").onclick = () => task(async () => { cancelAudio(); await request("/api/auth/logout", {}); state.data = null; state.session = null; state.captureIds = []; state.chatDrafts.clear(); showAuth(); });
+$("logout-button").onclick = () => task(async () => {
+  const userId = state.session.user.id;
+  await state.draftWrites.catch(() => {});
+  const prefix = encodeURIComponent(String(userId)) + ":";
+  const hasLocalData = (await localCaptures.all("outbox")).some((item) => item.context.startsWith(prefix)) ||
+    (await localCaptures.all("drafts")).some((item) => item.context.startsWith(prefix) && hasDraft(item));
+  if (hasLocalData && !confirm("Há rascunhos ou envios guardados neste aparelho. Sair da conta apagará essas cópias locais. Deseja sair mesmo assim?")) return;
+  cancelAudio(); await request("/api/auth/logout", {});
+  await state.draftWrites.catch(() => {});
+  let cleanupError = null;
+  try { await localCaptures.clearUser(userId); } catch (error) { cleanupError = error; }
+  state.data = null; state.session = null; state.localKey = null; state.captureIds = []; state.chatDrafts.clear();
+  $("capture-text").value = ""; $("message-input").value = ""; $("manual-form").reset();
+  showAuth();
+  if (cleanupError) toast("Você saiu da conta, mas não consegui limpar os rascunhos locais. Limpe os dados do site neste aparelho.");
+});
 
 function showAuth() {
   $("app-shell").hidden = true; $("auth-screen").hidden = false;
@@ -647,12 +823,12 @@ $("auth-form").onsubmit = (event) => {
       history.replaceState(null, "", location.pathname); setAuthMode("login"); $("auth-password").value = ""; feedback("auth-help", "Senha alterada. Entre com sua nova senha."); return;
     }
     state.session = await request("/api/auth/" + mode, body);
-    $("auth-password").value = ""; renderSession(); render(await request("/api/state"));
+    $("auth-password").value = ""; renderSession(); render(await request("/api/state")); await state.localReady;
     $("auth-screen").hidden = true; $("app-shell").hidden = false; openPanel("home");
   }, "auth-error");
 };
-window.addEventListener("offline", () => toast("Você está sem conexão. O texto em edição será mantido nesta tela."));
-window.addEventListener("online", () => toast("Conexão restabelecida."));
+window.addEventListener("offline", () => { persistDraft(); toast("Sem conexão. Seus envios ficam neste aparelho até você retomá-los."); });
+window.addEventListener("online", () => { refreshLocalNotice(); toast("Conexão restabelecida. Você pode retomar os envios neste aparelho."); });
 function fitViewport() {
   const height = window.visualViewport?.height || window.innerHeight;
   document.documentElement.style.setProperty("--app-height", height + "px");
@@ -665,7 +841,7 @@ async function init() {
   try {
     state.session = await request("/api/session");
     if (!state.session.user || state.authMode === "reset") return;
-    renderSession(); render(await request("/api/state"));
+    renderSession(); render(await request("/api/state")); await state.localReady;
     $("auth-screen").hidden = true; $("app-shell").hidden = false;
   } catch (error) { feedback("auth-error", error.message, true); }
 }

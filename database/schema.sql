@@ -70,6 +70,17 @@ CREATE TABLE categories (
   UNIQUE KEY uq_categories_control_name_kind (control_id, name, kind)
 );
 
+CREATE TABLE capture_requests (
+  user_id BIGINT UNSIGNED NOT NULL,
+  control_id BIGINT UNSIGNED NOT NULL,
+  request_key VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  operation VARCHAR(20) NOT NULL,
+  fingerprint CHAR(64) CHARACTER SET ascii NOT NULL,
+  capture_data LONGTEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, control_id, request_key)
+) ENGINE=InnoDB;
+
 CREATE TABLE transactions (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   control_id BIGINT UNSIGNED NULL,

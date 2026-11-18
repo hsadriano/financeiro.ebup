@@ -1,5 +1,6 @@
 <?php
 declare(strict_types=1);
+require_once __DIR__ . '/app/capture-requests.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -68,6 +69,19 @@ try {
         }
         set_active_control($pdo, $controlId);
     }
+
+    $captureKey = null;
+    if ($method === 'POST' && in_array($path, ['chat', 'audio', 'upload', 'transactions'], true)) {
+        $captureKey = capture_key($_SERVER['HTTP_IDEMPOTENCY_KEY'] ?? null);
+        if ($captureKey !== null) {
+            if ((string)($_SERVER['HTTP_X_FINUP_USER_ID'] ?? '') !== (string)$userId) throw new CaptureRequestError('A conta conectada mudou. Entre novamente para retomar o envio.', 409);
+            $requestedControl = (int)($_SERVER['HTTP_X_FINUP_CONTROL_ID'] ?? 0);
+            if (!$requestedControl || !user_can_access_control($pdo, $userId, $requestedControl)) throw new CaptureRequestError('Este espaço não está disponível para sua conta.', 403);
+            $controlId = $requestedControl;
+            $session['active_control_id'] = $controlId;
+        }
+    }
+    $captureReplay = fn() => build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, $session));
 
     if ($method === 'GET' && $path === 'state') {
         respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
@@ -142,7 +156,8 @@ try {
         if ($message === '') {
             respond(['error' => 'Mensagem vazia'], 400);
         }
-        respond(process_financial_message($pdo, $userId, $controlId, $message, $env));
+        respond(with_capture_request($pdo, $userId, $controlId, $captureKey, 'chat', capture_fingerprint('chat', $body),
+            fn() => process_financial_message($pdo, $userId, $controlId, $message, $env), $captureReplay));
     }
 
     if ($method === 'POST' && $path === 'audio') {
@@ -157,11 +172,12 @@ try {
         if (!str_starts_with($mimeType, 'audio/')) {
             respond(['error' => 'O arquivo enviado não é um áudio válido.'], 400);
         }
-        $message = transcribe_audio_with_openai((string)$file['tmp_name'], $mimeType, basename((string)$file['name']), $env);
-        if ($message === '') {
-            respond(['error' => 'Não consegui identificar fala nesse áudio.'], 422);
-        }
-        respond(process_financial_message($pdo, $userId, $controlId, $message, $env));
+        respond(with_capture_request($pdo, $userId, $controlId, $captureKey, 'audio', capture_fingerprint('audio', [], $file),
+            function () use ($pdo, $userId, $controlId, $file, $mimeType, $env) {
+                $message = transcribe_audio_with_openai((string)$file['tmp_name'], $mimeType, basename((string)$file['name']), $env);
+                if ($message === '') throw new CaptureRequestError('Não consegui identificar fala nesse áudio.', 422);
+                return process_financial_message($pdo, $userId, $controlId, $message, $env);
+            }, $captureReplay));
     }
 
     if ($method === 'POST' && $path === 'transactions') {
@@ -172,9 +188,9 @@ try {
             if ($count < 1 || $count > 60 || (float)($body['repeatCount'] ?? 1) !== (float)$count) throw new RuntimeException('Escolha entre 1 e 60 meses.');
         } catch (Throwable $error) { respond(['error' => $error->getMessage()], 400); }
         if ($transaction['accountId'] && !wallet_belongs_to_control($pdo, $transaction['accountId'], $controlId)) respond(['error' => 'Carteira inválida para este espaço.'], 400);
+        $result = with_capture_request($pdo, $userId, $controlId, $captureKey, 'manual', capture_fingerprint('manual', $body), function () use ($pdo, $userId, $controlId, $transaction, $count, $session) {
         $groupId = $count > 1 ? bin2hex(random_bytes(16)) : null;
         $ids = [];
-        $pdo->beginTransaction();
         for ($index = 0; $index < $count; $index++) {
             $occurrence = array_merge($transaction, [
                 'status' => 'pending', 'source' => 'manual', 'rawText' => '', 'confidence' => 1,
@@ -184,8 +200,9 @@ try {
             ]);
             $ids[] = add_transaction($pdo, $userId, $controlId, $occurrence)['id'];
         }
-        $pdo->commit();
-        respond(array_merge(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, $session)), ['capture' => ['transactionIds' => $ids]]));
+        return array_merge(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, $session)), ['capture' => ['transactionIds' => $ids]]);
+        }, $captureReplay);
+        respond($result);
     }
 
     if ($method === 'POST' && $path === 'transactions/bulk-update') {
@@ -247,14 +264,18 @@ try {
             respond(['error' => 'Nenhum arquivo enviado'], 400);
         }
 
+        $file = $_FILES['file'];
+        if ((int)($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) respond(['error' => 'Não foi possível receber o arquivo. Tente enviá-lo novamente.'], 400);
+        if ((int)($file['size'] ?? 0) > 20 * 1024 * 1024) respond(['error' => 'Escolha um arquivo de até 20 MB.'], 413);
+        $result = with_capture_request($pdo, $userId, $controlId, $captureKey, 'upload', capture_fingerprint('upload', [], $file), function () use ($pdo, $userId, $controlId, $file, $env, $captureKey) {
+
         $uploadDir = __DIR__ . '/uploads';
         if (!is_dir($uploadDir)) {
             mkdir($uploadDir, 0755, true);
         }
 
-        $file = $_FILES['file'];
         $originalName = basename((string)$file['name']);
-        $objectName = build_upload_object_name($controlId, $originalName);
+        $objectName = build_upload_object_name($controlId, $originalName, $captureKey !== null ? $userId . '-' . $captureKey : null);
         $storedName = $objectName;
         $target = "{$uploadDir}/{$storedName}";
         $targetDir = dirname($target);
@@ -263,7 +284,7 @@ try {
         }
 
         if (!move_uploaded_file((string)$file['tmp_name'], $target)) {
-            respond(['error' => 'Falha ao salvar upload'], 500);
+            throw new CaptureRequestError('Falha ao salvar upload.', 503);
         }
 
         $mimeType = (string)($file['type'] ?: 'application/octet-stream');
@@ -301,11 +322,15 @@ try {
         }
 
         add_message($pdo, $userId, $controlId, 'assistant', $message);
-        respond(array_merge(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])), ['capture' => ['transactionIds' => $captureIds, 'documentId' => (string)$documentId]]));
+        return array_merge(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])), ['capture' => ['transactionIds' => $captureIds, 'documentId' => (string)$documentId]]);
+        }, $captureReplay);
+        respond($result);
     }
 
     respond(['error' => 'Not found'], 404);
 } catch (Throwable $error) {
+    if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
+    if ($error instanceof CaptureRequestError) respond(['error' => $error->getMessage()], $error->getCode());
     respond(['error' => 'Erro interno', 'detail' => $error->getMessage()], 500);
 }
 
@@ -339,10 +364,11 @@ function unquote_env_value(string $value): string
     return $value;
 }
 
-function build_upload_object_name(int $controlId, string $originalName): string
+function build_upload_object_name(int $controlId, string $originalName, ?string $requestKey = null): string
 {
     $extension = pathinfo($originalName, PATHINFO_EXTENSION);
     $safeExtension = $extension !== '' ? preg_replace('/[^a-zA-Z0-9]/', '', $extension) : 'bin';
+    if ($requestKey !== null) return 'controls/' . $controlId . '/documents/requests/' . $requestKey . '.' . $safeExtension;
     return 'controls/' . $controlId . '/documents/' . date('Y-m-d') . '/' . time() . '-' . bin2hex(random_bytes(12)) . '.' . $safeExtension;
 }
 
@@ -506,6 +532,37 @@ function connect_db(array $env): PDO
 
 function ensure_schema(PDO $pdo): void
 {
+    $pdo->exec('CREATE TABLE IF NOT EXISTS finup_schema_versions (version VARCHAR(80) NOT NULL PRIMARY KEY, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB');
+    $version = '20261118_capture_receipts_v1';
+    $check = $pdo->prepare('SELECT 1 FROM finup_schema_versions WHERE version = ?');
+    $check->execute([$version]);
+    if ($check->fetchColumn()) return;
+    $lockName = 'finup-schema-' . sha1((string)$pdo->query('SELECT DATABASE()')->fetchColumn());
+    $lock = $pdo->prepare('SELECT GET_LOCK(?, 15)');
+    $lock->execute([$lockName]);
+    if ((int)$lock->fetchColumn() !== 1) throw new RuntimeException('A atualização do banco ainda está em andamento.');
+    try {
+        $check->execute([$version]);
+        if ($check->fetchColumn()) return;
+        apply_schema_updates($pdo);
+        $pdo->prepare('INSERT IGNORE INTO finup_schema_versions (version) VALUES (?)')->execute([$version]);
+    } finally {
+        $pdo->prepare('SELECT RELEASE_LOCK(?)')->execute([$lockName]);
+    }
+}
+
+function apply_schema_updates(PDO $pdo): void
+{
+    $pdo->exec("CREATE TABLE IF NOT EXISTS capture_requests (
+        user_id BIGINT UNSIGNED NOT NULL,
+        control_id BIGINT UNSIGNED NOT NULL,
+        request_key VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+        operation VARCHAR(20) NOT NULL,
+        fingerprint CHAR(64) CHARACTER SET ascii NOT NULL,
+        capture_data LONGTEXT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, control_id, request_key)
+    ) ENGINE=InnoDB");
     $pdo->exec("CREATE TABLE IF NOT EXISTS users (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         name VARCHAR(120) NOT NULL,
