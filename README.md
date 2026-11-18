@@ -144,11 +144,11 @@ Quando a chave estiver presente, o chat usa a Responses API com memória curta e
 
 As mensagens de voz são limitadas a 60 segundos. O áudio é enviado somente para transcrição e não é armazenado no banco nem no bucket; o histórico guarda apenas o texto transcrito.
 
-## OCR de comprovantes
+## Leitura de comprovantes e PDFs
 
-Com `OPENAI_API_KEY` configurada, uploads `image/*` sao analisados automaticamente. Se a IA encontrar valor, data, forma de pagamento e estabelecimento, o app cria um lançamento pendente para revisao.
+Com `OPENAI_API_KEY` configurada, imagens e PDFs válidos são analisados automaticamente. Se a IA identificar uma única transação com segurança, o app cria um lançamento pendente para revisão; nada entra nos totais antes da confirmação. Boletos e contas usam o vencimento como data da transação. Extratos com várias compras não são desmembrados automaticamente.
 
-PDFs ainda ficam salvos como pendentes; a leitura automatica de PDF entra na proxima etapa.
+PDFs são enviados como arquivo à Responses API com detalhe visual alto para permitir leitura de documentos digitalizados e letras pequenas. O conteúdo é processado pela IA configurada em `OPENAI_OCR_MODEL` e pode gerar custo conforme as páginas; a resposta não fica armazenada pela API (`store: false`). O limite de upload do app continua em 20 MB. Sem chave de IA, o arquivo é salvo normalmente para consulta, mas a leitura automática não ocorre.
 
 ## Google Cloud Storage
 
@@ -202,6 +202,6 @@ interpretação, captura isolada, recorrência, filtros, edição e contrato PHP
 
 Antes das lojas: testar câmera, microfone, teclado e safe areas em aparelhos físicos,
 adicionar consentimento de processamento por IA, exclusão de conta/dados e o pacote
-nativo. O reenvio com identificador e a recuperação de rascunhos já estão
-implementados. A abertura sem rede e a sincronização em segundo plano continuam
+nativo. O reenvio com identificador, recuperação de rascunhos e leitura de PDF já
+estão implementados. A abertura sem rede e a sincronização em segundo plano continuam
 como etapas futuras.

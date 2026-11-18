@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { loadEnv, hasDatabaseConfig } from "./config.js";
 import { JsonStorage } from "./storage.js";
 import { MariaDbStorage } from "./mariadb-storage.js";
-import { extractRecurrenceCount, parseFinancialImage, parseFinancialMessage, summarizeTransaction, summarizeTransactions } from "./parser.js";
+import { extractRecurrenceCount, hasPdfSignature, parseFinancialDocument, parseFinancialMessage, summarizeTransaction, summarizeTransactions } from "./parser.js";
 import { runFinancialAssistant } from "./assistant.js";
 import { monthlyOccurrences, normalizeTransactionInput, validDate } from "./transaction-input.js";
 import { captureKey, captureFingerprint } from "./capture-requests.js";
@@ -270,7 +270,7 @@ const server = createServer((request, response) => runStorageContext(async () =>
       const transactionIds = [];
       let message =
         `Recebi o arquivo "${document.originalName}". `;
-      const parsed = await parseFinancialImage(file.buffer, file.mimeType, file.originalName);
+      const parsed = await parseFinancialDocument(file.buffer, file.mimeType, file.originalName);
       if (parsed?.intent === "transaction") {
         const saved = await storage.addTransaction({ ...parsed.transaction, status: "pending" });
         transactionIds.push(saved.id);
@@ -278,11 +278,11 @@ const server = createServer((request, response) => runStorageContext(async () =>
         await storage.updateDocumentName(document.id, friendlyName);
         document.originalName = friendlyName;
         await storage.updateDocumentStatus(document.id, "review_pending");
-        message += `${summarizeTransaction(saved)} Confira os dados extraidos por OCR antes de confirmar.`;
-      } else if (file.mimeType.startsWith("image/") && process.env.OPENAI_API_KEY) {
+        message += `${summarizeTransaction(saved)} Confira os dados extraidos do arquivo antes de confirmar.`;
+      } else if ((file.mimeType.startsWith("image/") || file.mimeType === "application/pdf") && process.env.OPENAI_API_KEY) {
         await storage.updateDocumentStatus(document.id, "failed");
-        message += "Tentei fazer OCR, mas nao consegui encontrar uma transacao financeira com seguranca.";
-      } else if (file.mimeType.startsWith("image/")) {
+        message += "Nao consegui identificar uma transacao com seguranca neste arquivo. Ele continua disponivel para consulta.";
+      } else if (file.mimeType.startsWith("image/") || file.mimeType === "application/pdf") {
         message += "A leitura automática está indisponível no momento. O arquivo foi salvo.";
       } else {
         message += "O arquivo foi salvo, mas ainda não consigo ler este formato automaticamente.";
@@ -774,8 +774,17 @@ async function readMultipartFile(request, { fieldName, maxBytes }) {
 
   const rawHeaders = buffer.subarray(dispositionStart, headersEnd).toString("utf8");
   const originalName = path.basename(rawHeaders.match(/filename="([^"]+)"/)?.[1] || "arquivo");
-  const mimeType = rawHeaders.match(/Content-Type:\s*([^\r\n]+)/i)?.[1] || "application/octet-stream";
+  let mimeType = rawHeaders.match(/Content-Type:\s*([^\r\n]+)/i)?.[1] || "application/octet-stream";
   const content = buffer.subarray(contentStart, contentEnd);
+  const pdfClaimed = mimeType.toLowerCase() === "application/pdf" || /\.pdf$/i.test(originalName);
+  if (pdfClaimed) {
+    if (!hasPdfSignature(content)) {
+      const error = new Error("O arquivo PDF parece inválido. Escolha outro arquivo e tente novamente.");
+      error.status = 400;
+      throw error;
+    }
+    mimeType = "application/pdf";
+  }
   return { originalName, mimeType, buffer: content };
 }
 
