@@ -7,9 +7,11 @@
     "dev": "node src/server.js",
     "dev:lan": "HOST=0.0.0.0 node src/server.js",
     "start": "node src/server.js",
+    "preview:ux": "node scripts/preview-ux.mjs",
     "test": "node --test"
   },
   "dependencies": {
+    "lucide": "0.468.0",
     "mysql2": "^3.11.5"
   },
   "engines": {

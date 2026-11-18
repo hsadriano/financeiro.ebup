@@ -164,6 +164,30 @@ try {
         respond(process_financial_message($pdo, $userId, $controlId, $message, $env));
     }
 
+    if ($method === 'POST' && $path === 'transactions') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        try {
+            $transaction = normalize_transaction_changes($body);
+            $count = (int)($body['repeatCount'] ?? 1);
+            if ($count < 1 || $count > 60 || (float)($body['repeatCount'] ?? 1) !== (float)$count) throw new RuntimeException('Escolha entre 1 e 60 meses.');
+        } catch (Throwable $error) { respond(['error' => $error->getMessage()], 400); }
+        if ($transaction['accountId'] && !wallet_belongs_to_control($pdo, $transaction['accountId'], $controlId)) respond(['error' => 'Carteira inválida para este espaço.'], 400);
+        $groupId = $count > 1 ? bin2hex(random_bytes(16)) : null;
+        $ids = [];
+        $pdo->beginTransaction();
+        for ($index = 0; $index < $count; $index++) {
+            $occurrence = array_merge($transaction, [
+                'status' => 'pending', 'source' => 'manual', 'rawText' => '', 'confidence' => 1,
+                'transactionDate' => add_months_to_iso_date($transaction['transactionDate'], $index),
+                'dueDate' => $transaction['dueDate'] ? add_months_to_iso_date($transaction['dueDate'], $index) : ($index > 0 ? add_months_to_iso_date($transaction['transactionDate'], $index) : null),
+                'recurrenceGroupId' => $groupId, 'recurrenceIndex' => $groupId ? $index + 1 : null, 'recurrenceTotal' => $groupId ? $count : null,
+            ]);
+            $ids[] = add_transaction($pdo, $userId, $controlId, $occurrence)['id'];
+        }
+        $pdo->commit();
+        respond(array_merge(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, $session)), ['capture' => ['transactionIds' => $ids]]));
+    }
+
     if ($method === 'POST' && $path === 'transactions/bulk-update') {
         $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
         try {
@@ -180,10 +204,17 @@ try {
         respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
     }
 
-    if ($method === 'POST' && preg_match('#^transactions/([^/]+)/(confirm|dismiss|remove|update)$#', $path, $matches)) {
-        if ($matches[2] === 'update') {
+    if ($method === 'POST' && preg_match('#^transactions/([^/]+)/(confirm|dismiss|remove|update|paid|restore)$#', $path, $matches)) {
+        $existing = null;
+        foreach (read_data($pdo, $userId, $controlId)['transactions'] as $item) if ($item['id'] === $matches[1]) $existing = $item;
+        if (!$existing || ($existing['status'] === 'dismissed' && $matches[2] !== 'restore')) respond(['error' => 'Lançamento não encontrado.'], 404);
+        if (in_array($matches[2], ['update', 'paid'], true)) {
             $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
-            $changes = normalize_transaction_changes($body);
+            if ($matches[2] === 'paid' && $existing['status'] !== 'scheduled') respond(['error' => 'Esta conta não está em aberto.'], 400);
+            try {
+                $changes = normalize_transaction_changes($matches[2] === 'paid' ? array_merge($existing, ['transactionDate' => $body['transactionDate'] ?? '']) : array_merge($existing, $body));
+            } catch (Throwable $error) { respond(['error' => $error->getMessage()], 400); }
+            $changes['status'] = $matches[2] === 'paid' ? 'paid' : ($existing['status'] === 'pending' ? 'pending' : ($changes['dueDate'] && ($body['paymentState'] ?? '') === 'scheduled' ? 'scheduled' : ($existing['status'] === 'paid' ? 'paid' : 'confirmed')));
             if ($changes['accountId'] && !wallet_belongs_to_control($pdo, $changes['accountId'], $controlId)) {
                 respond(['error' => 'Carteira inválida para este controle financeiro.'], 400);
             }
@@ -194,12 +225,15 @@ try {
             respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
         }
 
-        $status = $matches[2] === 'confirm' ? 'confirmed' : 'dismissed';
+        if ($matches[2] === 'confirm' && $existing['status'] !== 'pending') respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, $session)));
+        if ($matches[2] === 'restore' && $existing['status'] !== 'dismissed') respond(['error' => 'Este lançamento não foi removido.'], 400);
+        $body = $matches[2] === 'restore' ? (json_decode((string)file_get_contents('php://input'), true) ?: []) : [];
+        $status = $matches[2] === 'restore' ? (in_array($body['status'] ?? '', ['pending', 'confirmed', 'paid', 'scheduled'], true) ? $body['status'] : 'pending') : ($matches[2] === 'confirm' ? 'confirmed' : 'dismissed');
         $updated = update_transaction_status($pdo, $userId, $controlId, $matches[1], $status);
         if (!$updated) {
             respond(['error' => 'Lancamento nao encontrado'], 404);
         }
-        if ($matches[2] === 'confirm' && $updated['kind'] === 'expense' && $updated['dueDate']) {
+        if ($matches[2] === 'confirm' && $updated['dueDate']) {
             $updated = update_transaction_status($pdo, $userId, $controlId, $matches[1], 'scheduled');
         }
 
@@ -245,11 +279,13 @@ try {
         $message = "Recebi o arquivo \"{$originalName}\". ";
         $documentId = (int)$pdo->lastInsertId();
         $parsed = parse_image_with_openai($target, $mimeType, $originalName, $env);
+        $captureIds = [];
 
         if (($parsed['intent'] ?? '') === 'transaction') {
             $transaction = $parsed['transaction'];
             $transaction['status'] = 'pending';
             $saved = add_transaction($pdo, $userId, $controlId, $transaction);
+            $captureIds[] = $saved['id'];
             $friendlyName = document_name_from_transaction($saved['description'], $originalName);
             update_document_name($pdo, $userId, $controlId, $documentId, $friendlyName);
             $originalName = $friendlyName;
@@ -259,13 +295,13 @@ try {
             update_document_status($pdo, $userId, $controlId, $documentId, 'failed');
             $message .= 'Tentei fazer OCR, mas nao consegui encontrar uma transacao financeira com seguranca.';
         } elseif (str_starts_with($mimeType, 'image/')) {
-            $message .= 'Para fazer OCR automaticamente, configure OPENAI_API_KEY no .env.';
+            $message .= 'A leitura automática está indisponível no momento. O arquivo foi salvo.';
         } else {
-            $message .= 'Por enquanto o OCR automatico esta habilitado para imagens. PDF fica salvo para a proxima etapa.';
+            $message .= 'O arquivo foi salvo, mas ainda não consigo ler este formato automaticamente.';
         }
 
         add_message($pdo, $userId, $controlId, 'assistant', $message);
-        respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
+        respond(array_merge(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])), ['capture' => ['transactionIds' => $captureIds, 'documentId' => (string)$documentId]]));
     }
 
     respond(['error' => 'Not found'], 404);
@@ -1267,8 +1303,8 @@ function add_document(PDO $pdo, int $userId, int $controlId, array $document): v
 
 function serve_document(PDO $pdo, int $userId, int $controlId, string $id, array $env): void
 {
-    $stmt = $pdo->prepare('SELECT original_name AS originalName, stored_name AS storedName, mime_type AS mimeType FROM documents WHERE id = ? AND user_id = ? AND control_id = ? LIMIT 1');
-    $stmt->execute([$id, $userId, $controlId]);
+    $stmt = $pdo->prepare('SELECT original_name AS originalName, stored_name AS storedName, mime_type AS mimeType FROM documents WHERE id = ? AND control_id = ? LIMIT 1');
+    $stmt->execute([$id, $controlId]);
     $document = $stmt->fetch();
     if (!$document) {
         respond(['error' => 'Arquivo nao encontrado'], 404);
@@ -1404,8 +1440,8 @@ function document_name_from_transaction(string $description, string $originalNam
 
 function update_transaction_status(PDO $pdo, int $userId, int $controlId, string $id, string $status): ?array
 {
-    $stmt = $pdo->prepare('UPDATE transactions SET status = ? WHERE id = ? AND user_id = ? AND control_id = ?');
-    $stmt->execute([$status, $id, $userId, $controlId]);
+    $stmt = $pdo->prepare('UPDATE transactions SET status = ? WHERE id = ? AND control_id = ?');
+    $stmt->execute([$status, $id, $controlId]);
     $data = read_data($pdo, $userId, $controlId);
     foreach ($data['transactions'] as $transaction) {
         if ($transaction['id'] === $id) {
@@ -1427,8 +1463,9 @@ function update_transaction(PDO $pdo, int $userId, int $controlId, string $id, a
             payment_method = ?,
             account_id = ?,
             transaction_date = ?,
-            due_date = ?
-        WHERE id = ? AND user_id = ? AND control_id = ? AND status = ?');
+            due_date = ?,
+            status = ?
+        WHERE id = ? AND control_id = ? AND status <> ?');
     $stmt->execute([
         $changes['kind'],
         $categoryId,
@@ -1439,10 +1476,10 @@ function update_transaction(PDO $pdo, int $userId, int $controlId, string $id, a
         $changes['accountId'],
         $changes['transactionDate'],
         $changes['dueDate'],
+        $changes['status'],
         $id,
-        $userId,
         $controlId,
-        'pending',
+        'dismissed',
     ]);
 
     $data = read_data($pdo, $userId, $controlId);
@@ -1469,7 +1506,8 @@ function build_state(array $data, array $sessionPayload): array
     $month = date('Y-m');
     $confirmed = array_values(array_filter($data['transactions'], fn($item) => in_array($item['status'], ['confirmed', 'paid', 'scheduled'], true)));
     $pending = array_values(array_filter($data['transactions'], fn($item) => $item['status'] === 'pending'));
-    $monthTransactions = array_values(array_filter($confirmed, fn($item) => str_starts_with($item['transactionDate'], $month)));
+    $settled = array_values(array_filter($confirmed, fn($item) => $item['status'] !== 'scheduled'));
+    $monthTransactions = array_values(array_filter($settled, fn($item) => str_starts_with($item['transactionDate'], $month)));
     $income = sum_items(array_filter($monthTransactions, fn($item) => $item['kind'] === 'income'));
     $expenses = sum_items(array_filter($monthTransactions, fn($item) => $item['kind'] === 'expense'));
     $payable = array_values(array_filter($confirmed, fn($item) => $item['status'] === 'scheduled'));
@@ -1492,7 +1530,7 @@ function build_state(array $data, array $sessionPayload): array
             'categories' => $expenseCategories,
             'expenseCategories' => $expenseCategories,
             'incomeCategories' => $incomeCategories,
-            'monthlySeries' => build_monthly_series($confirmed),
+            'monthlySeries' => build_monthly_series($settled),
         ],
     ];
 }
@@ -1502,6 +1540,7 @@ function process_financial_message(PDO $pdo, int $userId, int $controlId, string
     add_message($pdo, $userId, $controlId, 'user', $message);
     $data = read_data($pdo, $userId, $controlId);
     $assistantResult = run_financial_assistant($message, $data, $env);
+    $captureIds = [];
 
     if (($assistantResult['kind'] ?? '') === 'update_transactions') {
         $assistant = apply_assistant_transaction_update($pdo, $controlId, $assistantResult, $data);
@@ -1511,6 +1550,7 @@ function process_financial_message(PDO $pdo, int $userId, int $controlId, string
             $transaction['status'] = 'pending';
             $saved[] = add_transaction($pdo, $userId, $controlId, $transaction);
         }
+        $captureIds = array_column($saved, 'id');
         $assistant = count($saved) > 1
             ? summarize_transactions($saved) . ' Confira os dados e confirme para salvar nos relatorios.'
             : summarize_transaction($saved[0]) . ' Confira os dados e confirme para salvar nos relatorios.';
@@ -1525,6 +1565,7 @@ function process_financial_message(PDO $pdo, int $userId, int $controlId, string
                 $transaction['status'] = 'pending';
                 $saved[] = add_transaction($pdo, $userId, $controlId, $transaction);
             }
+            $captureIds = array_column($saved, 'id');
             $assistant = count($saved) > 1
                 ? summarize_transactions($saved) . ' Confira os dados e confirme para salvar nos relatorios.'
                 : summarize_transaction($saved[0]) . ' Confira os dados e confirme para salvar nos relatorios.';
@@ -1534,10 +1575,12 @@ function process_financial_message(PDO $pdo, int $userId, int $controlId, string
     }
 
     add_message($pdo, $userId, $controlId, 'assistant', $assistant);
-    return build_state(
+    $result = build_state(
         read_data($pdo, $userId, $controlId),
         session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])
     );
+    $result['capture'] = ['transactionIds' => $captureIds];
+    return $result;
 }
 
 function attach_recurrence_group(array $transactions, string $message): array
@@ -1776,6 +1819,7 @@ function financial_assistant_instructions(array $wallets = []): string
         . 'Quando o usuário disser todos, série, parcelas, mensalidades ou recorrências, atualize o grupo inteiro; não altere apenas uma ocorrência. '
         . 'Carteiras disponíveis neste controle: ' . ($walletNames ? implode(', ', $walletNames) : 'nenhuma') . '. Ao mover, use o nome exato da carteira informado pelo usuário; se não estiver claro, pergunte antes. '
         . 'Para contas a pagar use status scheduled e date_basis due. Para comparar meses, consulte o intervalo completo e agrupe por month. '
+        . 'Para quanto gastei, recebi e resultado realizado, use status settled (confirmed e paid, sem contas futuras) e date_basis transaction. Só inclua scheduled em previsões ou consultas explícitas de contas em aberto. '
         . 'Não afirme que registrou algo antes de chamar propose_transactions. Os lançamentos propostos ainda serão confirmados pelo usuário. '
         . 'Responda de forma objetiva, amigável e fácil de ler no celular. Mostre valores em reais e datas em DD/MM/AAAA. '
         . 'Não exponha JSON, nomes de ferramentas, IDs internos ou detalhes técnicos.';
@@ -1818,7 +1862,7 @@ function financial_assistant_tools(): array
                 'type' => 'object',
                 'properties' => [
                     'kind' => ['type' => 'string', 'enum' => ['income', 'expense', 'all']],
-                    'status' => ['type' => 'string', 'enum' => ['confirmed', 'paid', 'scheduled', 'all']],
+                    'status' => ['type' => 'string', 'enum' => ['confirmed', 'paid', 'settled', 'scheduled', 'all']],
                     'date_basis' => ['type' => 'string', 'enum' => ['transaction', 'due', 'auto']],
                     'start_date' => ['type' => ['string', 'null'], 'format' => 'date'],
                     'end_date' => ['type' => ['string', 'null'], 'format' => 'date'],
@@ -1863,7 +1907,7 @@ function financial_response_text(array $payload): string
 function analyze_transactions_for_assistant(array $transactions, array $filters): array
 {
     $kind = in_array($filters['kind'] ?? '', ['income', 'expense', 'all'], true) ? $filters['kind'] : 'all';
-    $status = in_array($filters['status'] ?? '', ['confirmed', 'paid', 'scheduled', 'all'], true) ? $filters['status'] : 'all';
+    $status = in_array($filters['status'] ?? '', ['confirmed', 'paid', 'settled', 'scheduled', 'all'], true) ? $filters['status'] : 'all';
     $dateBasis = in_array($filters['date_basis'] ?? '', ['transaction', 'due', 'auto'], true) ? $filters['date_basis'] : 'auto';
     $startDate = is_iso_date((string)($filters['start_date'] ?? '')) ? (string)$filters['start_date'] : null;
     $endDate = is_iso_date((string)($filters['end_date'] ?? '')) ? (string)$filters['end_date'] : null;
@@ -1876,7 +1920,7 @@ function analyze_transactions_for_assistant(array $transactions, array $filters)
     $filtered = array_values(array_filter($transactions, function ($item) use ($kind, $status, $dateBasis, $startDate, $endDate, $category, $search, $accountName) {
         if (!in_array($item['status'] ?? '', ['confirmed', 'paid', 'scheduled'], true)) return false;
         if ($kind !== 'all' && ($item['kind'] ?? '') !== $kind) return false;
-        if ($status !== 'all' && ($item['status'] ?? '') !== $status) return false;
+        if ($status === 'settled' ? ($item['status'] ?? '') === 'scheduled' : ($status !== 'all' && ($item['status'] ?? '') !== $status)) return false;
         if ($category !== '' && normalize_assistant_filter($item['category'] ?? '') !== $category) return false;
         if ($accountName !== '' && normalize_assistant_filter($item['accountName'] ?? '') !== $accountName) return false;
         if ($search !== '') {
@@ -2274,8 +2318,10 @@ function add_months_to_iso_date(string $isoDate, int $months): string
 
 function normalize_transaction_changes(array $body): array
 {
-    $amount = (float)str_replace(',', '.', (string)($body['amount'] ?? ''));
-    if ($amount <= 0) {
+    $amountText = trim((string)($body['amount'] ?? ''));
+    $normalizedAmount = str_contains($amountText, ',') ? str_replace(',', '.', str_replace('.', '', $amountText)) : $amountText;
+    $amount = (float)$normalizedAmount;
+    if (!is_numeric($normalizedAmount) || !is_finite($amount) || $amount <= 0 || $amount >= 1e12) {
         throw new RuntimeException('Valor invalido.');
     }
 
@@ -2296,12 +2342,12 @@ function normalize_transaction_changes(array $body): array
 function normalize_date(string $value): string
 {
     $date = substr($value, 0, 10);
-    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+    $parts = explode('-', $date);
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date) || !checkdate((int)($parts[1] ?? 0), (int)($parts[2] ?? 0), (int)($parts[0] ?? 0))) {
         throw new RuntimeException('Data invalida.');
     }
     return $date;
 }
-
 function extract_amount(string $text): ?float
 {
     $patterns = [

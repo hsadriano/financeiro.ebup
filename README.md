@@ -40,9 +40,32 @@ Em hospedagem PHP/Apache, como Hostinger compartilhada, o projeto tambem roda di
 - Dashboard mensal com receitas, despesas, resultado, contas a pagar e categorias.
 - Área de configurações para editar perfil, senha, controle compartilhado e carteiras.
 - Carteiras vinculáveis aos lançamentos, com tipo, saldo inicial e saldo calculado.
+- Navegação mobile com Início, Extrato, Registrar, Contas e Assistente.
+- Conferência isolada por captura, sem misturar rascunhos anteriores.
+- Registro manual sem IA, com repetição mensal e ajuste ao último dia do mês.
+- Edição de lançamentos salvos, registro de pagamento/recebimento e remoção com desfazer.
+- Alteração de valor/carteira em seleção ou série: só este, este e os próximos, ou todos.
 - Armazenamento em MariaDB quando `.env` estiver configurado.
 - Fallback local em `data/finance.json` quando não houver configuração de banco.
 - Schema MariaDB em `database/schema.sql`.
+
+## Prévia de usabilidade
+
+```bash
+pnpm run preview:ux
+```
+
+Abre uma prévia isolada em http://127.0.0.1:3021 com dados fictícios em memória. Não lê o
+`.env`, não acessa o banco e não chama serviços de IA. Os dados são reiniciados ao
+encerrar o processo. Use `PORT=3022 pnpm run preview:ux` se a porta estiver ocupada.
+
+No app real, Início mostra valores realizados no mês e próximos vencimentos.
+Contas futuras não entram como dinheiro já gasto/recebido. Toda captura fica como
+rascunho até a confirmação. Ao repetir um lançamento já realizado manualmente,
+somente a primeira ocorrência é realizada; as próximas ficam em aberto.
+
+Os ícones Lucide 0.468.0 são distribuídos localmente em `public/lucide.min.js`,
+preservando a licença do pacote e sem depender de CDN no celular.
 
 ## Banco de dados
 
@@ -119,7 +142,10 @@ Quando `GOOGLE_CLOUD_CREDENTIALS_FILE` estiver vazio, o app procura automaticame
 app/config/keys/*.json
 ```
 
-Os arquivos `.json` dessa pasta ficam fora do Git. Se as credenciais não estiverem presentes, o upload continua funcionando localmente em `uploads/`.
+Os arquivos `.json` dessa pasta ficam fora do Git. Se um bucket estiver configurado
+mas as credenciais não existirem, o envio informa falha. Sem bucket configurado,
+os arquivos são armazenados em `uploads/`. O Apache bloqueia acesso HTTP direto
+às pastas internas e a `uploads/`; comprovantes são servidos pela API autenticada.
 
 ## Recuperação de senha por e-mail
 
@@ -145,9 +171,12 @@ Boleto aluguel R$ 1800 vence 10/08
 Gastei 42,50 com Uber ontem no cartão
 ```
 
-## Próximos passos técnicos
+## Validação e próximos passos
 
-1. Trocar o storage JSON pelo MariaDB usando o schema em `database/schema.sql`.
-2. Adicionar OCR real para imagens/PDFs.
-3. Criar fluxo de confirmação antes de salvar lançamentos de baixa confiança.
-4. Adicionar autenticação e criptografia de dados sensíveis.
+Execute `pnpm test` e `php -l api.php` antes de publicar. Os testes cobrem
+interpretação, captura isolada, recorrência, filtros, edição e contrato PHP de entrada.
+
+Antes das lojas: testar câmera, microfone, teclado e safe areas em aparelhos físicos,
+adicionar consentimento de processamento por IA, exclusão de conta/dados e o pacote
+nativo. A captura offline com sincronização e idempotência entre reconexões ainda
+não está implementada; em falha de conexão, conferir Para revisar antes de reenviar.

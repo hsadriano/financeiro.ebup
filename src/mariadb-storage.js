@@ -160,8 +160,8 @@ export class MariaDbStorage {
 
   async updateTransactionStatus(id, status) {
     await this.pool.execute(
-      `UPDATE transactions SET status = ? WHERE id = ? AND user_id = ? AND control_id = ?`,
-      [status, id, this.userId, this.controlId]
+      `UPDATE transactions SET status = ? WHERE id = ? AND control_id = ?`,
+      [status, id, this.controlId]
     );
     const [rows] = await this.pool.execute(
       `SELECT
@@ -187,9 +187,9 @@ export class MariaDbStorage {
        FROM transactions t
        LEFT JOIN categories c ON c.id = t.category_id
        LEFT JOIN financial_accounts a ON a.id = t.account_id
-       WHERE t.id = ? AND t.user_id = ? AND t.control_id = ?
+       WHERE t.id = ? AND t.control_id = ?
        LIMIT 1`,
-      [id, this.userId, this.controlId]
+      [id, this.controlId]
     );
     return rows[0] ? normalizeTransaction(rows[0]) : null;
   }
@@ -206,8 +206,9 @@ export class MariaDbStorage {
            payment_method = ?,
            account_id = ?,
            transaction_date = ?,
-           due_date = ?
-       WHERE id = ? AND user_id = ? AND control_id = ? AND status = 'pending'`,
+           due_date = ?,
+           status = ?
+       WHERE id = ? AND control_id = ? AND status <> 'dismissed'`,
       [
         changes.kind,
         categoryId,
@@ -218,8 +219,8 @@ export class MariaDbStorage {
         changes.accountId || null,
         changes.transactionDate,
         changes.dueDate,
+        changes.status,
         id,
-        this.userId,
         this.controlId
       ]
     );
@@ -248,9 +249,9 @@ export class MariaDbStorage {
        FROM transactions t
        LEFT JOIN categories c ON c.id = t.category_id
        LEFT JOIN financial_accounts a ON a.id = t.account_id
-       WHERE t.id = ? AND t.user_id = ? AND t.control_id = ?
+       WHERE t.id = ? AND t.control_id = ?
        LIMIT 1`,
-      [id, this.userId, this.controlId]
+      [id, this.controlId]
     );
     return rows[0] ? normalizeTransaction(rows[0]) : null;
   }

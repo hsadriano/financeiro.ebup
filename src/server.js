@@ -9,6 +9,7 @@ import { JsonStorage } from "./storage.js";
 import { MariaDbStorage } from "./mariadb-storage.js";
 import { extractRecurrenceCount, parseFinancialImage, parseFinancialMessage, summarizeTransaction, summarizeTransactions } from "./parser.js";
 import { runFinancialAssistant } from "./assistant.js";
+import { monthlyOccurrences, normalizeTransactionInput, validDate } from "./transaction-input.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -171,6 +172,19 @@ const server = createServer(async (request, response) => {
       return sendJson(response, await processFinancialMessage(message));
     }
 
+    if (request.method === "POST" && url.pathname === "/api/transactions") {
+      const body = await readJson(request);
+      let transactions;
+      try { transactions = monthlyOccurrences(body, crypto.randomUUID()); }
+      catch (error) { return sendJson(response, { error: error.message }, 400); }
+      if (transactions[0].accountId && !(await walletBelongsToControl(transactions[0].accountId, session.activeControlId))) {
+        return sendJson(response, { error: "Carteira inválida para este espaço." }, 400);
+      }
+      const transactionIds = [];
+      for (const transaction of transactions) transactionIds.push((await storage.addTransaction(transaction)).id);
+      return sendJson(response, { ...buildState(await storage.read()), capture: { transactionIds } });
+    }
+
     if (request.method === "POST" && url.pathname === "/api/transactions/bulk-update") {
       const body = await readJson(request);
       let changes;
@@ -190,13 +204,21 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "POST" && url.pathname.startsWith("/api/transactions/")) {
       const [, , , id, action] = url.pathname.split("/");
-      if (!id || !["confirm", "dismiss", "remove", "update"].includes(action)) {
+      if (!id || !["confirm", "dismiss", "remove", "update", "paid", "restore"].includes(action)) {
         return sendJson(response, { error: "Acao invalida" }, 400);
       }
 
-      if (action === "update") {
+      const existing = (await storage.read()).transactions.find((item) => String(item.id) === id);
+      if (!existing || (existing.status === "dismissed" && action !== "restore")) return sendJson(response, { error: "Lançamento não encontrado." }, 404);
+
+      if (action === "update" || action === "paid") {
         const body = await readJson(request);
-        const changes = normalizeTransactionChanges(body);
+        let changes;
+        try {
+          changes = normalizeTransactionInput(action === "paid" ? { ...existing, transactionDate: validDate(body.transactionDate) } : { ...existing, ...body });
+        } catch (error) { return sendJson(response, { error: error.message }, 400); }
+        if (action === "paid" && existing.status !== "scheduled") return sendJson(response, { error: "Esta conta não está em aberto." }, 400);
+        changes.status = action === "paid" ? "paid" : existing.status === "pending" ? "pending" : (changes.dueDate && body.paymentState === "scheduled" ? "scheduled" : existing.status === "paid" ? "paid" : "confirmed");
         if (changes.accountId && !(await walletBelongsToControl(changes.accountId, session.activeControlId))) {
           return sendJson(response, { error: "Carteira inválida para este controle financeiro." }, 400);
         }
@@ -205,10 +227,13 @@ const server = createServer(async (request, response) => {
         return sendJson(response, buildState(await storage.read()));
       }
 
-      let status = action === "confirm" ? "confirmed" : "dismissed";
+      if (action === "confirm" && existing.status !== "pending") return sendJson(response, buildState(await storage.read()));
+      if (action === "restore" && existing.status !== "dismissed") return sendJson(response, { error: "Este lançamento não foi removido." }, 400);
+      const restoreBody = action === "restore" ? await readJson(request) : {};
+      let status = action === "restore" ? (["pending", "confirmed", "paid", "scheduled"].includes(restoreBody.status) ? restoreBody.status : "pending") : action === "confirm" ? "confirmed" : "dismissed";
       let updated = await storage.updateTransactionStatus(id, status);
       if (!updated) return sendJson(response, { error: "Lancamento nao encontrado" }, 404);
-      if (action === "confirm" && updated.kind === "expense" && updated.dueDate) {
+      if (action === "confirm" && updated.dueDate) {
         status = "scheduled";
         updated = await storage.updateTransactionStatus(id, status);
       }
@@ -227,11 +252,13 @@ const server = createServer(async (request, response) => {
         status: "ocr_pending"
       });
 
+      const transactionIds = [];
       let message =
         `Recebi o arquivo "${document.originalName}". `;
       const parsed = await parseFinancialImage(file.buffer, file.mimeType, file.originalName);
       if (parsed?.intent === "transaction") {
         const saved = await storage.addTransaction({ ...parsed.transaction, status: "pending" });
+        transactionIds.push(saved.id);
         const friendlyName = documentNameFromTransaction(saved.description, document.originalName);
         await storage.updateDocumentName(document.id, friendlyName);
         document.originalName = friendlyName;
@@ -241,12 +268,12 @@ const server = createServer(async (request, response) => {
         await storage.updateDocumentStatus(document.id, "failed");
         message += "Tentei fazer OCR, mas nao consegui encontrar uma transacao financeira com seguranca.";
       } else if (file.mimeType.startsWith("image/")) {
-        message += "Para fazer OCR automaticamente, configure OPENAI_API_KEY no .env.";
+        message += "A leitura automática está indisponível no momento. O arquivo foi salvo.";
       } else {
-        message += "Por enquanto o OCR automatico esta habilitado para imagens. PDF fica salvo para a proxima etapa.";
+        message += "O arquivo foi salvo, mas ainda não consigo ler este formato automaticamente.";
       }
       await storage.addMessage({ role: "assistant", content: message });
-      return sendJson(response, buildState(await storage.read()));
+      return sendJson(response, { ...buildState(await storage.read()), capture: { transactionIds, documentId: document.id } });
     }
 
     if (["GET", "HEAD"].includes(request.method) && !url.pathname.startsWith("/api/")) {
@@ -286,6 +313,7 @@ async function createStorage() {
 async function processFinancialMessage(message) {
   await storage.addMessage({ role: "user", content: message });
   const data = await storage.read();
+  const captureIds = [];
   const assistantResult = await runFinancialAssistant({
     message,
     history: data.messages,
@@ -302,6 +330,7 @@ async function processFinancialMessage(message) {
     for (const transaction of groupedTransactions) {
       saved.push(await storage.addTransaction({ ...transaction, status: "pending" }));
     }
+    captureIds.push(...saved.map((item) => item.id));
     assistantContent = saved.length > 1
       ? `${summarizeTransactions(saved)} Confira os dados e confirme para salvar nos relatorios.`
       : `${summarizeTransaction(saved[0])} Confira os dados e confirme para salvar nos relatorios.`;
@@ -315,6 +344,7 @@ async function processFinancialMessage(message) {
       for (const transaction of transactions) {
         saved.push(await storage.addTransaction({ ...transaction, status: "pending" }));
       }
+      captureIds.push(...saved.map((item) => item.id));
       assistantContent = saved.length > 1
         ? `${summarizeTransactions(saved)} Confira os dados e confirme para salvar nos relatorios.`
         : `${summarizeTransaction(saved[0])} Confira os dados e confirme para salvar nos relatorios.`;
@@ -324,7 +354,8 @@ async function processFinancialMessage(message) {
   }
 
   await storage.addMessage({ role: "assistant", content: assistantContent });
-  return buildState(await storage.read());
+  const result = buildState(await storage.read());
+  return { ...result, capture: { transactionIds: captureIds } };
 }
 
 function attachRecurrenceGroup(transactions, message) {
@@ -429,7 +460,8 @@ function buildState(data) {
   const month = now.toISOString().slice(0, 7);
   const confirmedTransactions = data.transactions.filter((item) => ["confirmed", "paid", "scheduled"].includes(item.status));
   const pendingTransactions = data.transactions.filter((item) => item.status === "pending");
-  const monthTransactions = confirmedTransactions.filter((item) => item.transactionDate.startsWith(month));
+  const settledTransactions = confirmedTransactions.filter((item) => item.status !== "scheduled");
+  const monthTransactions = settledTransactions.filter((item) => item.transactionDate.startsWith(month));
   const income = sum(monthTransactions.filter((item) => item.kind === "income"));
   const expenses = sum(monthTransactions.filter((item) => item.kind === "expense"));
   const payable = data.transactions
@@ -437,7 +469,7 @@ function buildState(data) {
     .sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
   const expenseCategories = groupByCategory(monthTransactions, "expense");
   const incomeCategories = groupByCategory(monthTransactions, "income");
-  const monthlySeries = buildMonthlySeries(confirmedTransactions, now);
+  const monthlySeries = buildMonthlySeries(settledTransactions, now);
 
   return {
     messages: data.messages,
@@ -645,26 +677,6 @@ function documentObjectName(storedName) {
   return value;
 }
 
-function normalizeTransactionChanges(body) {
-  const amount = Number(String(body.amount || "").replace(",", "."));
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error("Valor invalido.");
-  }
-
-  const kind = body.kind === "income" ? "income" : "expense";
-  return {
-    kind,
-    amount,
-    description: String(body.description || "").trim().slice(0, 160) || "Lancamento sem descricao",
-    merchant: String(body.merchant || "").trim() || null,
-    paymentMethod: String(body.paymentMethod || "").trim() || null,
-    accountId: String(body.accountId || "").trim() || null,
-    transactionDate: normalizeDate(body.transactionDate),
-    dueDate: body.dueDate ? normalizeDate(body.dueDate) : null,
-    category: String(body.category || "").trim() || (kind === "income" ? "Renda" : "Outros")
-  };
-}
-
 function normalizeBulkTransactionChanges(body) {
   const ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).map((id) => String(id).trim()).filter(Boolean))].slice(0, 100);
   if ((Array.isArray(body.ids) ? body.ids.length : 0) > 100) throw new Error("Selecione no máximo 100 lançamentos por vez.");
@@ -683,14 +695,6 @@ function normalizeBulkTransactionChanges(body) {
   }
   if (changes.accountId === undefined && changes.amount === undefined) throw new Error("Informe uma carteira ou um novo valor.");
   return changes;
-}
-
-function normalizeDate(value) {
-  const text = String(value || "").slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
-    throw new Error("Data invalida.");
-  }
-  return text;
 }
 
 async function readJson(request) {

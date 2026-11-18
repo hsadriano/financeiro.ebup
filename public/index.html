@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#168255" />
+    <meta name="theme-color" content="#f5f7f4" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Finup" />
@@ -11,298 +11,100 @@
     <link rel="icon" type="image/png" href="/finup-favicon.png" />
     <link rel="apple-touch-icon" href="/finup-logo.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/styles.css?v=20261117-1" />
+    <link rel="stylesheet" href="/styles.css?v=20261118-1" />
+    <script src="/lucide.min.js?v=0.468.0" defer></script>
   </head>
   <body>
     <section id="auth-screen" class="auth-screen">
       <form id="auth-form" class="auth-card">
-        <div class="brand">
-          <img class="brand-mark" src="/finup-logo.png" alt="" />
-          <div>
-            <strong>Finup</strong>
-            <span>entrar na conta</span>
-          </div>
-        </div>
-        <label id="auth-name-field">
-          <span>Nome</span>
-          <input id="auth-name" type="text" autocomplete="name" placeholder="Seu nome" />
-        </label>
-        <label id="auth-email-field">
-          <span>E-mail</span>
-          <input id="auth-email" type="email" autocomplete="email" required />
-        </label>
-        <label id="auth-password-field">
-          <span>Senha</span>
-          <input id="auth-password" type="password" autocomplete="current-password" required />
-        </label>
-        <label id="auth-remember-field" class="remember-row">
-          <input id="auth-remember" type="checkbox" checked />
-          <span>Permanecer logado</span>
-        </label>
-        <p id="auth-error" class="form-error" hidden></p>
-        <div class="auth-actions">
-          <button type="submit" data-auth-action="login">Entrar</button>
-          <button type="button" data-auth-action="register">Criar conta</button>
-        </div>
-        <button id="forgot-password-button" class="link-button" type="button">Esqueci minha senha</button>
-        <button id="back-login-button" class="link-button" type="button" hidden>Voltar para entrar</button>
-        <p id="auth-help" class="form-help" hidden></p>
+        <div class="brand auth-brand"><img src="/finup-logo.png" alt="" /><div><strong>Finup</strong><span id="auth-subtitle">Entrar na conta</span></div></div>
+        <label id="auth-name-field" hidden><span>Nome</span><input id="auth-name" autocomplete="name" /></label>
+        <label id="auth-email-field"><span>E-mail</span><input id="auth-email" type="email" autocomplete="email" required /></label>
+        <label id="auth-password-field"><span>Senha</span><input id="auth-password" type="password" autocomplete="current-password" required minlength="6" /></label>
+        <label id="auth-remember-field" class="check-row"><input id="auth-remember" type="checkbox" checked /><span>Permanecer conectado</span></label>
+        <p id="auth-error" class="form-error" role="alert" hidden></p>
+        <p id="auth-help" class="form-help" role="status" hidden></p>
+        <button id="auth-submit" class="primary" type="submit">Entrar</button>
+        <button id="auth-register" class="text-button" type="button">Criar conta</button>
+        <button id="forgot-password-button" class="text-button" type="button">Esqueci minha senha</button>
+        <button id="back-login-button" class="text-button" type="button" hidden>Voltar para entrar</button>
       </form>
     </section>
 
     <main id="app-shell" class="app-shell" hidden>
       <header class="app-header">
-        <div class="brand">
-          <img class="brand-mark" src="/finup-logo.png" alt="" />
-          <div>
-            <strong>Finup</strong>
-            <span>assistente pessoal</span>
-          </div>
-        </div>
-        <div class="control-bar">
-          <span id="user-name" class="user-pill"></span>
-          <select id="control-select" title="Controle financeiro"></select>
-          <button id="new-control-button" type="button">Novo</button>
-          <button id="share-control-button" type="button">Compartilhar</button>
-          <button id="logout-button" type="button">Sair</button>
-        </div>
+        <div class="brand"><img src="/finup-logo.png" alt="" /><div><strong>Finup</strong><span id="user-name"></span></div></div>
+        <label class="space-picker"><span>Espaço</span><select id="control-select" aria-label="Espaço financeiro"></select></label>
+        <button id="profile-button" class="icon-button" type="button" aria-label="Perfil e configurações" title="Perfil e configurações"><i data-lucide="user-round"></i></button>
       </header>
-
       <section class="workspace">
-        <aside class="sidebar panel-screen active" data-panel="summary" aria-label="Painel financeiro">
-          <header class="panel-hero">
-            <div>
-              <h1>Painel</h1>
-              <p>Acompanhe seus numeros e envie comprovantes rapidamente.</p>
-            </div>
-            <label class="upload-button" for="file-input" title="Enviar comprovante, boleto, nota ou extrato">
-              <span>Enviar arquivo</span>
-            </label>
-          </header>
-
-          <div class="metric-grid">
-            <article class="metric metric-link" data-dashboard-filter="income" tabindex="0" role="button" aria-label="Ver receitas do mês">
-              <span>Receitas</span>
-              <strong id="income">R$ 0,00</strong>
-            </article>
-            <article class="metric metric-link" data-dashboard-filter="expense" tabindex="0" role="button" aria-label="Ver despesas do mês">
-              <span>Despesas</span>
-              <strong id="expenses">R$ 0,00</strong>
-            </article>
-            <article class="metric result metric-link" data-dashboard-filter="result" tabindex="0" role="button" aria-label="Ver resultado do mês">
-              <span>Resultado</span>
-              <strong id="result">R$ 0,00</strong>
-            </article>
-            <article class="metric metric-link" data-dashboard-filter="payable" tabindex="0" role="button" aria-label="Ver contas a pagar">
-              <span>A pagar</span>
-              <strong id="payable">R$ 0,00</strong>
-            </article>
-          </div>
-
-          <div class="panel">
-            <div class="panel-title">
-              <h2>Categorias</h2>
-              <div class="segmented-control" role="tablist" aria-label="Tipo de categoria">
-                <button type="button" class="active" data-category-kind="expense">Despesas</button>
-                <button type="button" data-category-kind="income">Receitas</button>
-              </div>
-            </div>
-            <div id="categories" class="category-list"></div>
-          </div>
-
-          <div class="panel">
-            <div class="panel-title">
-              <h2>Gráficos</h2>
-            </div>
-            <div id="insights" class="insight-grid"></div>
-          </div>
-        </aside>
-
-        <section class="chat-area panel-screen" data-panel="chat" aria-label="Chat financeiro">
-          <header class="topbar">
-            <div>
-              <h1>Assistente financeiro</h1>
-              <p>Converse, envie comprovantes e acompanhe seus numeros.</p>
-            </div>
-            <label class="upload-button" for="file-input" title="Enviar comprovante, boleto, nota ou extrato">
-              <span>Enviar arquivo</span>
-            </label>
-          </header>
-
-          <div id="messages" class="messages" aria-live="polite"></div>
-
-          <form id="chat-form" class="composer">
-            <p id="audio-status" class="audio-status" aria-live="polite" hidden></p>
-            <input
-              id="message-input"
-              type="text"
-              autocomplete="off"
-              placeholder="Ex.: paguei R$ 89,90 no mercado hoje no pix"
-            />
-            <button
-              id="audio-button"
-              class="audio-button"
-              type="button"
-              title="Gravar mensagem de voz"
-              aria-label="Gravar mensagem de voz"
-            >
-              <svg class="microphone-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Zm-5-3a1 1 0 0 1 2 0 3 3 0 1 0 6 0 1 1 0 1 1 2 0 5 5 0 0 1-5 4.9V19h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-3.1A5 5 0 0 1 7 11Z" />
-              </svg>
-              <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M7 7h10v10H7z" />
-              </svg>
-            </button>
-            <button type="submit" title="Enviar mensagem">Enviar</button>
-          </form>
+        <section id="workspace-error" class="workspace-error" role="alert" hidden><i data-lucide="wifi-off"></i><h2>Não consegui carregar este espaço</h2><p>Seus dados continuam salvos.</p><button type="button" id="reload-space" class="primary">Tentar novamente</button></section>
+        <section class="panel-screen active" data-panel="home" aria-label="Início">
+          <header class="screen-heading"><div><p class="eyebrow" id="today-label"></p><h1>Início</h1></div><button class="text-button" data-open="reports" type="button">Relatórios <i data-lucide="chart-no-axes-combined"></i></button></header>
+          <button id="review-notice" class="notice-row" data-open="pending" type="button" hidden><i data-lucide="clipboard-check"></i><span><strong id="review-count"></strong><small>Conferir antes de salvar</small></span><i data-lucide="chevron-right"></i></button>
+          <section class="home-section"><div class="section-heading"><h2>Próximos vencimentos</h2><button class="text-button" data-open="bills" type="button">Ver todos <i data-lucide="arrow-right"></i></button></div><div id="home-bills" class="item-list"></div></section>
+          <section class="home-section"><div class="section-heading"><h2>Este mês</h2><span class="muted" id="month-label"></span></div><div class="month-summary">
+            <button type="button" data-dashboard-filter="income"><span>Entrou</span><strong id="income" class="income"></strong></button>
+            <button type="button" data-dashboard-filter="expense"><span>Saiu</span><strong id="expenses" class="expense"></strong></button>
+            <button type="button" data-dashboard-filter="all"><span>Resultado</span><strong id="result"></strong></button>
+          </div></section>
+          <section class="home-section"><div class="section-heading"><h2>Últimos lançamentos</h2><button class="text-button" data-open="ledger" type="button">Ver todos <i data-lucide="arrow-right"></i></button></div><div id="recent-transactions" class="item-list"></div></section>
+          <div class="home-links"><button class="text-button" data-open="files" type="button"><i data-lucide="paperclip"></i>Meus comprovantes</button><button class="text-button" data-open="chat" type="button"><i data-lucide="messages-square"></i>Perguntar ao assistente</button></div>
         </section>
 
-        <aside class="ledger panel-screen" data-panel="review" aria-label="Lancamentos">
-          <div class="panel-title">
-            <h2>Aguardando confirmação</h2>
-          </div>
-          <div id="pending-transactions" class="transaction-list pending-list"></div>
-
-          <div class="panel-title">
-            <div>
-              <h2 id="ledger-title">Lançamentos</h2>
-              <p id="ledger-filter-summary" class="filter-summary">Todos os lançamentos confirmados.</p>
-            </div>
-            <button id="clear-ledger-filters" class="filter-clear-button" type="button">Limpar</button>
-          </div>
-          <div class="ledger-filters" aria-label="Filtros de lançamentos">
-            <label>
-              <span>Tipo</span>
-              <select id="ledger-kind-filter">
-                <option value="all">Todos</option>
-                <option value="income">Receitas</option>
-                <option value="expense">Despesas</option>
-                <option value="payable">A pagar</option>
-              </select>
-            </label>
-            <label>
-              <span>Período</span>
-              <select id="ledger-period-filter">
-                <option value="current-month">Mês atual</option>
-                <option value="upcoming">Próximos vencimentos</option>
-                <option value="all">Todo histórico</option>
-              </select>
-            </label>
-            <label>
-              <span>Categoria</span>
-              <input id="ledger-category-filter" list="category-options" placeholder="Todas" />
-            </label>
-          </div>
-          <form id="bulk-update-form" class="bulk-update-toolbar">
-            <label class="bulk-select-visible"><input id="select-visible-transactions" type="checkbox" /><span>Selecionar visíveis</span></label>
-            <span id="bulk-selection-count" class="bulk-selection-count">0 selecionados</span>
-            <label>
-              <span>Carteira</span>
-              <select id="bulk-account-select">
-                <option value="__keep">Manter atual</option>
-                <option value="__none">Sem carteira</option>
-              </select>
-            </label>
-            <label>
-              <span>Novo valor por lançamento</span>
-              <input id="bulk-amount" inputmode="decimal" placeholder="Ex.: 1.234,56" />
-            </label>
-            <button id="apply-bulk-update" type="submit" disabled>Aplicar alterações</button>
-          </form>
-          <div id="transactions" class="transaction-list"></div>
-        </aside>
-
-        <aside class="files-panel panel-screen" data-panel="files" aria-label="Arquivos">
-          <div class="panel-title">
-            <h2>Arquivos</h2>
-          </div>
-          <div id="documents" class="document-list"></div>
-        </aside>
-
-        <section class="settings-panel panel-screen" data-panel="settings" aria-label="Configurações">
-          <header class="settings-header">
-            <h1>Configurações</h1>
-            <p>Gerencie seu acesso, suas carteiras e este controle financeiro.</p>
-          </header>
-          <p id="settings-feedback" class="settings-feedback" hidden></p>
-
-          <section class="settings-section">
-            <div class="settings-section-title"><h2>Perfil</h2><p>Dados usados para identificar sua conta.</p></div>
-            <form id="profile-form" class="settings-form two-columns">
-              <label><span>Nome</span><input id="profile-name" name="name" autocomplete="name" required /></label>
-              <label><span>E-mail</span><input id="profile-email" name="email" type="email" autocomplete="email" required /></label>
-              <button type="submit">Salvar perfil</button>
-            </form>
-          </section>
-
-          <section class="settings-section">
-            <div class="settings-section-title"><h2>Carteiras</h2><p>Contas bancárias, dinheiro, cartões e investimentos deste controle.</p></div>
-            <div id="wallet-list" class="wallet-list"></div>
-            <form id="wallet-form" class="settings-form wallet-form">
-              <label><span>Nome</span><input name="name" placeholder="Ex.: Conta principal" required /></label>
-              <label><span>Tipo</span><select name="type"><option value="checking">Conta corrente</option><option value="savings">Poupança</option><option value="cash">Dinheiro</option><option value="credit_card">Cartão de crédito</option><option value="investment">Investimento</option></select></label>
-              <label><span>Saldo inicial</span><input name="openingBalance" inputmode="decimal" value="0,00" /></label>
-              <button type="submit">Adicionar carteira</button>
-            </form>
-          </section>
-
-          <section class="settings-section">
-            <div class="settings-section-title"><h2>Controle financeiro</h2><p>Nome do espaço compartilhado e acesso de outras pessoas.</p></div>
-            <form id="control-settings-form" class="settings-form two-columns">
-              <label><span>Nome</span><input id="control-settings-name" name="name" required /></label>
-              <button type="submit">Salvar nome</button>
-            </form>
-            <form id="share-settings-form" class="settings-form two-columns">
-              <label><span>Compartilhar com</span><input name="email" type="email" placeholder="email@exemplo.com" required /></label>
-              <button type="submit">Conceder acesso</button>
-            </form>
-          </section>
-
-          <section class="settings-section">
-            <div class="settings-section-title"><h2>Segurança</h2><p>Troque sua senha sem sair do aplicativo.</p></div>
-            <form id="password-form" class="settings-form two-columns">
-              <label><span>Senha atual</span><input name="currentPassword" type="password" autocomplete="current-password" required /></label>
-              <label><span>Nova senha</span><input name="newPassword" type="password" autocomplete="new-password" minlength="6" required /></label>
-              <button type="submit">Alterar senha</button>
-            </form>
-          </section>
+        <section class="panel-screen" data-panel="ledger" aria-label="Lançamentos">
+          <header class="screen-heading"><div><p class="eyebrow">Seu histórico</p><h1>Lançamentos</h1></div><button id="selection-toggle" class="text-button" type="button">Selecionar</button></header>
+          <div class="filter-bar"><label class="search-field"><i data-lucide="search"></i><input id="ledger-search" type="search" placeholder="Buscar lançamento" aria-label="Buscar lançamento" /></label><button class="icon-button" id="filter-toggle" type="button" aria-label="Filtros" title="Filtros" aria-expanded="false"><i data-lucide="sliders-horizontal"></i></button></div>
+          <div id="ledger-filters" class="filter-fields" hidden><label><span>Tipo</span><select id="ledger-kind"><option value="all">Todos</option><option value="expense">Despesas</option><option value="income">Receitas</option></select></label><label><span>Período</span><select id="ledger-period"><option value="current-month">Mês atual</option><option value="previous-month">Mês anterior</option><option value="all">Todo o histórico</option></select></label><label><span>Categoria</span><input id="ledger-category" list="category-options" placeholder="Todas" /></label><label><span>Carteira</span><select id="ledger-wallet"><option value="">Todas</option></select></label><button id="clear-filters" type="button" class="text-button">Limpar filtros</button></div>
+          <p id="ledger-summary" class="list-caption"></p><div id="selection-bar" class="selection-bar" hidden><span id="selection-count"></span><button id="bulk-edit" class="text-button" type="button">Alterar seleção <i data-lucide="pencil"></i></button></div><div id="transactions" class="item-list"></div>
+        </section>
+        <section class="panel-screen" data-panel="bills" aria-label="Contas">
+          <header class="screen-heading"><div><p class="eyebrow">Vencimentos</p><h1>Contas</h1></div></header><div class="segmented" aria-label="Situação das contas"><button type="button" class="active" data-bill-filter="open" aria-pressed="true">Em aberto</button><button type="button" data-bill-filter="paid" aria-pressed="false">Pagas / recebidas</button></div><p id="bills-summary" class="list-caption"></p><div id="bills" class="item-list"></div>
+        </section>
+        <section class="panel-screen chat-panel" data-panel="chat" aria-label="Assistente">
+          <header class="screen-heading"><div><p class="eyebrow">Finup</p><h1>Assistente</h1></div><button class="icon-button" data-open="pending" type="button" aria-label="Itens para revisar" title="Itens para revisar"><i data-lucide="clipboard-check"></i><span id="chat-pending-count" class="badge" hidden></span></button></header>
+          <div id="messages" class="messages" aria-live="polite"></div><div class="chat-suggestions"><button type="button" data-question="Quais contas vencem nesta semana?">Contas da semana</button><button type="button" data-question="Quanto gastei neste mês por categoria?">Gastos do mês</button></div>
+          <form id="chat-form" class="composer"><button class="icon-button" type="button" data-capture="file" aria-label="Anexar comprovante" title="Anexar comprovante"><i data-lucide="paperclip"></i></button><input id="message-input" placeholder="Escreva para o Finup" autocomplete="off" aria-label="Mensagem" /><button type="button" class="icon-button" data-audio="chat" aria-label="Gravar áudio" title="Gravar áudio"><i data-lucide="mic"></i></button><button class="icon-button primary" type="submit" aria-label="Enviar mensagem" title="Enviar mensagem"><i data-lucide="send"></i></button></form>
+        </section>
+        <section class="panel-screen" data-panel="pending" aria-label="Para revisar"><header class="screen-heading"><button class="icon-button" data-back type="button" aria-label="Voltar" title="Voltar"><i data-lucide="arrow-left"></i></button><div><p class="eyebrow">Ainda não salvo nos totais</p><h1>Para revisar</h1></div></header><div id="pending-transactions" class="item-list"></div></section>
+        <section class="panel-screen" data-panel="files" aria-label="Comprovantes"><header class="screen-heading"><button class="icon-button" data-back type="button" aria-label="Voltar" title="Voltar"><i data-lucide="arrow-left"></i></button><div><h1>Comprovantes</h1></div><button class="icon-button" type="button" data-capture="file" aria-label="Adicionar comprovante" title="Adicionar comprovante"><i data-lucide="plus"></i></button></header><div id="documents" class="item-list"></div></section>
+        <section class="panel-screen" data-panel="reports" aria-label="Relatórios"><header class="screen-heading"><button class="icon-button" data-back type="button" aria-label="Voltar" title="Voltar"><i data-lucide="arrow-left"></i></button><div><p class="eyebrow" id="report-month"></p><h1>Relatórios</h1></div></header><div id="insights"></div><div class="section-heading"><h2>Por categoria</h2><div class="segmented"><button type="button" class="active" data-category="expense">Despesas</button><button type="button" data-category="income">Receitas</button></div></div><div id="categories" class="item-list"></div></section>
+        <section class="panel-screen" data-panel="settings" aria-label="Configurações">
+          <header class="screen-heading"><button class="icon-button" data-back type="button" aria-label="Voltar" title="Voltar"><i data-lucide="arrow-left"></i></button><div><h1>Sua conta</h1></div></header><p id="settings-feedback" class="inline-feedback" role="status" hidden></p>
+          <details class="settings-group"><summary><i data-lucide="user-round"></i>Perfil</summary><form id="profile-form" class="settings-form"><label><span>Nome</span><input id="profile-name" name="name" autocomplete="name" required /></label><label><span>E-mail</span><input id="profile-email" name="email" type="email" autocomplete="email" required /></label><button class="primary" type="submit">Salvar perfil</button></form></details>
+          <details class="settings-group"><summary><i data-lucide="wallet"></i>Carteiras</summary><div id="wallet-list"></div><form id="wallet-form" class="settings-form"><h2>Adicionar carteira</h2><label><span>Nome</span><input name="name" placeholder="Ex.: Nubank ou Dinheiro" required /></label><label><span>Tipo</span><select name="type"><option value="checking">Conta corrente</option><option value="cash">Dinheiro</option><option value="credit_card">Cartão de crédito</option><option value="savings">Poupança</option><option value="investment">Investimento</option></select></label><label><span>Saldo inicial</span><input name="openingBalance" inputmode="decimal" value="0,00" required /></label><button class="primary" type="submit">Adicionar carteira</button></form></details>
+          <details class="settings-group"><summary><i data-lucide="house"></i>Espaço financeiro</summary><form id="control-settings-form" class="settings-form"><label><span>Nome do espaço atual</span><input id="control-name" name="name" required /></label><button class="primary" type="submit">Salvar nome</button></form><form id="new-control-form" class="settings-form"><label><span>Nome do novo espaço</span><input name="name" required placeholder="Ex.: Casa ou Trabalho" /></label><button type="submit">Criar outro espaço</button></form></details>
+          <details class="settings-group"><summary><i data-lucide="users-round"></i>Compartilhamento</summary><form id="share-form" class="settings-form"><label><span>E-mail de quem terá acesso a este espaço</span><input name="email" type="email" required /></label><button class="primary" type="submit">Conceder acesso</button></form></details>
+          <details class="settings-group"><summary><i data-lucide="lock-keyhole"></i>Segurança</summary><form id="password-form" class="settings-form"><label><span>Senha atual</span><input name="currentPassword" type="password" autocomplete="current-password" required /></label><label><span>Nova senha</span><input name="newPassword" type="password" autocomplete="new-password" minlength="6" required /></label><button class="primary" type="submit">Alterar senha</button></form></details>
+          <button class="settings-link" data-open="files" type="button"><i data-lucide="files"></i>Comprovantes<i data-lucide="chevron-right"></i></button><button id="logout-button" class="settings-link danger" type="button"><i data-lucide="log-out"></i>Sair da conta</button>
         </section>
       </section>
-
       <nav class="tabbar" aria-label="Navegação principal">
-        <button type="button" class="active" data-tab="summary" aria-label="Painel" title="Painel">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z" /></svg>
-        </button>
-        <button type="button" data-tab="chat" aria-label="Chat" title="Chat">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5C4 4.1 5.1 3 6.5 3h11C18.9 3 20 4.1 20 5.5v8c0 1.4-1.1 2.5-2.5 2.5H9l-4.1 3.1c-.4.3-.9 0-.9-.5V5.5Z" /></svg>
-        </button>
-        <button type="button" data-tab="review" aria-label="Revisar" title="Revisar">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10c1.1 0 2 .9 2 2v14c0 1.1-.9 2-2 2H7c-1.1 0-2-.9-2-2V5c0-1.1.9-2 2-2Zm1 5h8V6H8v2Zm0 5h8v-2H8v2Zm0 5h5v-2H8v2Z" /></svg>
-          <span id="pending-badge" class="badge" hidden>0</span>
-        </button>
-        <button type="button" data-tab="files" aria-label="Arquivos" title="Arquivos">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4c0-1.1.9-2 2-2h6l6 6v12c0 1.1-.9 2-2 2H7c-1.1 0-2-.9-2-2V4Zm8 1v4h4l-4-4ZM8 13h8v-2H8v2Zm0 4h8v-2H8v2Z" /></svg>
-          <span id="files-badge" class="badge" hidden>0</span>
-        </button>
-        <button type="button" data-tab="settings" aria-label="Configurações" title="Configurações">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.7 7.7 0 0 0 0-2l2-1.6-2-3.4-2.5 1a8 8 0 0 0-1.7-1L14.8 3h-4l-.4 2.9a8 8 0 0 0-1.7 1L6.2 6l-2 3.4 2 1.6a7.7 7.7 0 0 0 0 2l-2 1.6 2 3.4 2.5-1a8 8 0 0 0 1.7 1l.4 3h4l.4-3a8 8 0 0 0 1.7-1l2.5 1 2-3.4-2-1.6ZM12.8 15.5a3.6 3.6 0 1 1 0-7.1 3.6 3.6 0 0 1 0 7.1Z" /></svg>
-        </button>
+        <button type="button" data-tab="home" class="active" aria-current="page"><i data-lucide="house"></i><span>Início</span></button>
+        <button type="button" data-tab="ledger"><i data-lucide="list"></i><span>Extrato</span></button>
+        <button id="register-button" type="button" class="register-nav"><i data-lucide="plus"></i><span>Registrar</span></button>
+        <button type="button" data-tab="bills"><i data-lucide="calendar-days"></i><span>Contas</span></button>
+        <button type="button" data-tab="chat"><i data-lucide="messages-square"></i><span>Assistente</span></button>
       </nav>
-      <input id="file-input" class="file-input" type="file" accept="image/*,.pdf,.txt,.csv" />
     </main>
 
-    <datalist id="category-options">
-      <option value="Mercado"></option>
-      <option value="Alimentação"></option>
-      <option value="Moradia"></option>
-      <option value="Transporte"></option>
-      <option value="Saúde"></option>
-      <option value="Educação"></option>
-      <option value="Lazer"></option>
-      <option value="Renda"></option>
-      <option value="Outros"></option>
-    </datalist>
-
-    <script src="/app.js?v=20261028-1" type="module"></script>
+    <dialog id="capture-dialog" class="sheet" aria-labelledby="capture-title">
+      <header class="sheet-heading"><div><p class="eyebrow" id="capture-space"></p><h1 id="capture-title">Registrar</h1></div><button type="button" class="icon-button" data-close="capture-dialog" aria-label="Fechar registro" title="Fechar"><i data-lucide="x"></i></button></header>
+      <div id="capture-entry">
+        <form id="capture-text-form"><label class="sr-only" for="capture-text">O que você quer registrar?</label><textarea id="capture-text" rows="3" placeholder="Gastei 15 reais no pão hoje" autocomplete="off"></textarea><div class="capture-actions"><button type="button" data-audio="capture"><i data-lucide="mic"></i>Falar</button><button type="submit" class="primary"><i data-lucide="arrow-right"></i>Continuar</button></div></form>
+        <div class="capture-sources"><button type="button" data-capture="camera"><i data-lucide="camera"></i>Foto</button><button type="button" data-capture="file"><i data-lucide="paperclip"></i>Arquivo</button><button type="button" id="manual-toggle"><i data-lucide="keyboard"></i>Manual</button></div>
+        <form id="manual-form" class="settings-form" hidden><div class="form-grid"><label><span>Valor (R$)</span><input name="amount" inputmode="decimal" placeholder="0,00" required /></label><label><span>Tipo</span><select name="kind"><option value="expense">Despesa</option><option value="income">Receita</option></select></label></div><label><span>Descrição</span><input name="description" placeholder="Ex.: Pão no mercadinho" required /></label><div class="form-grid"><label><span>Situação</span><select name="paymentState"><option value="settled">Já pago / recebido</option><option value="scheduled">A pagar / receber</option></select></label><label><span id="manual-date-label">Data</span><input name="transactionDate" type="date" required /></label></div><details><summary>Mais detalhes</summary><div class="settings-form"><label><span>Categoria</span><input name="category" list="category-options" placeholder="Outros" /></label><label><span>Carteira</span><select name="accountId"></select></label><label><span>Repetir mensalmente</span><select name="repeatCount"><option value="1">Não repetir</option><option value="3">3 meses</option><option value="6">6 meses</option><option value="12">12 meses</option><option value="24">24 meses</option></select></label></div></details><button type="submit" class="primary">Conferir lançamento</button></form>
+      </div>
+      <div id="capture-progress" class="progress-state" role="status" hidden><i data-lucide="loader-circle" class="spinner"></i><strong id="capture-progress-text">Preparando…</strong></div>
+      <p id="capture-error" class="inline-feedback error" role="alert" hidden></p>
+      <div id="capture-result" hidden><div id="capture-preview"></div><p class="list-caption" id="capture-result-note"></p><div class="sheet-actions"><button id="capture-edit" type="button"><i data-lucide="pencil"></i>Editar</button><button id="capture-save" class="primary" type="button"><i data-lucide="check"></i>Salvar</button></div><button id="capture-discard" class="text-button danger" type="button">Descartar esta captura</button></div>
+    </dialog>
+    <dialog id="detail-dialog" class="sheet" aria-labelledby="detail-title"><header class="sheet-heading"><h1 id="detail-title">Lançamento</h1><button class="icon-button" type="button" data-close="detail-dialog" aria-label="Fechar detalhes" title="Fechar"><i data-lucide="x"></i></button></header><div id="detail-body"></div><p id="detail-error" class="inline-feedback error" role="alert" hidden></p></dialog>
+    <dialog id="bulk-dialog" class="sheet" aria-labelledby="bulk-title"><header class="sheet-heading"><h1 id="bulk-title">Alterar lançamentos</h1><button class="icon-button" type="button" data-close="bulk-dialog" aria-label="Fechar alteração" title="Fechar"><i data-lucide="x"></i></button></header><form id="bulk-form" class="settings-form"><p id="bulk-caption"></p><label><span>Novo valor por lançamento</span><input name="amount" inputmode="decimal" placeholder="Manter valor atual" /></label><label><span>Carteira</span><select name="accountId"></select></label><label id="bulk-scope-label" hidden><span>Aplicar a</span><select name="scope"><option value="one">Só este lançamento</option><option value="next">Este e os próximos da série</option><option value="all">Toda a série</option></select></label><p id="bulk-preview" class="list-caption"></p><p id="bulk-error" class="inline-feedback error" role="alert" hidden></p><button type="submit" class="primary">Aplicar alterações</button></form></dialog>
+    <div id="audio-bar" class="audio-bar" role="status" hidden><i data-lucide="mic"></i><span id="audio-status"></span><button type="button" class="icon-button" id="audio-cancel" aria-label="Cancelar gravação" title="Cancelar gravação"><i data-lucide="x"></i></button><button type="button" class="icon-button primary" id="audio-stop" aria-label="Parar e enviar" title="Parar e enviar"><i data-lucide="square"></i></button></div>
+    <div id="toast" class="toast" role="status" hidden><span id="toast-text"></span><button id="toast-action" class="text-button" type="button" hidden>Desfazer</button><button class="icon-button" type="button" id="toast-close" aria-label="Fechar aviso" title="Fechar aviso"><i data-lucide="x"></i></button></div>
+    <input id="file-input" type="file" accept="image/*,.pdf,.txt,.csv" hidden /><input id="camera-input" type="file" accept="image/*" capture="environment" hidden />
+    <datalist id="category-options"><option value="Mercado"></option><option value="Alimentação"></option><option value="Moradia"></option><option value="Transporte"></option><option value="Saúde"></option><option value="Educação"></option><option value="Lazer"></option><option value="Renda"></option><option value="Outros"></option></datalist>
+    <script src="/app.js?v=20261118-1" type="module"></script>
   </body>
 </html>

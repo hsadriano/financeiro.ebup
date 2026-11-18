@@ -81,7 +81,7 @@ export async function runFinancialAssistant({ message, history, transactions, wa
 
 export function analyzeTransactions(transactions, filters = {}) {
   const kind = ["income", "expense", "all"].includes(filters.kind) ? filters.kind : "all";
-  const status = ["confirmed", "paid", "scheduled", "all"].includes(filters.status) ? filters.status : "all";
+  const status = ["confirmed", "paid", "settled", "scheduled", "all"].includes(filters.status) ? filters.status : "all";
   const dateBasis = ["transaction", "due", "auto"].includes(filters.date_basis) ? filters.date_basis : "auto";
   const startDate = isIsoDate(filters.start_date) ? filters.start_date : null;
   const endDate = isIsoDate(filters.end_date) ? filters.end_date : null;
@@ -94,7 +94,7 @@ export function analyzeTransactions(transactions, filters = {}) {
   const filtered = transactions
     .filter((item) => allowedStatuses.has(item.status))
     .filter((item) => kind === "all" || item.kind === kind)
-    .filter((item) => status === "all" || item.status === status)
+    .filter((item) => status === "all" || (status === "settled" ? item.status !== "scheduled" : item.status === status))
     .filter((item) => !category || normalizeFilter(item.category) === category)
     .filter((item) => !accountName || normalizeFilter(item.accountName) === accountName)
     .filter((item) => {
@@ -177,6 +177,7 @@ function assistantInstructions(now, wallets) {
     "Quando o usuário disser todos, série, parcelas, mensalidades ou recorrências, atualize o grupo inteiro; não altere apenas uma ocorrência.",
     `Carteiras disponíveis neste controle: ${walletNames.length ? walletNames.join(", ") : "nenhuma"}. Ao mover, use o nome exato da carteira informado pelo usuário; se não estiver claro, pergunte antes.`,
     "Para contas a pagar use status scheduled e date_basis due. Para comparar meses, consulte o intervalo completo e agrupe por month.",
+    "Para quanto gastei, recebi e resultado realizado, use status settled (confirmed e paid, sem contas futuras) e date_basis transaction. Só inclua scheduled em previsões ou consultas explícitas de contas em aberto.",
     "Não afirme que registrou algo antes de chamar propose_transactions. Os lançamentos propostos ainda serão confirmados pelo usuário.",
     "Responda de forma objetiva, amigável e fácil de ler no celular. Mostre valores em reais e datas em DD/MM/AAAA.",
     "Não exponha JSON, nomes de ferramentas, IDs internos ou detalhes técnicos."
@@ -230,7 +231,7 @@ function financialTools() {
         type: "object",
         properties: {
           kind: { type: "string", enum: ["income", "expense", "all"] },
-          status: { type: "string", enum: ["confirmed", "paid", "scheduled", "all"] },
+          status: { type: "string", enum: ["confirmed", "paid", "settled", "scheduled", "all"] },
           date_basis: { type: "string", enum: ["transaction", "due", "auto"] },
           start_date: { type: ["string", "null"], format: "date" },
           end_date: { type: ["string", "null"], format: "date" },

@@ -45,6 +45,14 @@ test("uses due dates for upcoming payable queries", () => {
   assert.equal(result.items[0].due_date, "2026-09-25");
 });
 
+test("settled queries match realized totals and exclude future bills", () => {
+  const result = analyzeTransactions([...transactions, { ...transactions[1], id: "paid", amount: 80, status: "paid" }], {
+    kind: "expense", status: "settled", date_basis: "transaction", start_date: "2026-08-01", end_date: "2026-09-30"
+  });
+  assert.equal(result.summary.expenses, 200);
+  assert.equal(result.summary.count, 2);
+});
+
 test("normalizes month-based recurrence even when proposed dates are weekly", () => {
   const proposed = Array.from({ length: 3 }, (_, index) => ({
     kind: "expense",
