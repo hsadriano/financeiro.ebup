@@ -23,6 +23,17 @@ export function seriesTargets(items, transaction, scope) {
     (scope === "all" || (item.dueDate || item.transactionDate) >= (transaction.dueDate || transaction.transactionDate)));
 }
 
+export function moveTargets(items, ids) {
+  const selectedIds = new Set(ids.map(String));
+  const active = items.filter((item) => item.status !== "dismissed");
+  const selected = active.filter((item) => selectedIds.has(String(item.id)));
+  if (!selected.length || selected.length !== selectedIds.size) {
+    throw Object.assign(new Error("Não encontrei todos os lançamentos selecionados no espaço atual."), { status: 404 });
+  }
+  const recurrenceIds = new Set(selected.map((item) => item.recurrenceGroupId).filter(Boolean).map(String));
+  return active.filter((item) => selectedIds.has(String(item.id)) || recurrenceIds.has(String(item.recurrenceGroupId || "")));
+}
+
 export function filterLedger(items, filters, now = new Date()) {
   const normalize = (text) => String(text || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
   const month = filters.period === "previous-month"

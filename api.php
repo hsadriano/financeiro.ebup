@@ -70,6 +70,14 @@ try {
         set_active_control($pdo, $controlId);
     }
 
+    if ($method === 'GET' && preg_match('#^controls/(\d+)/wallets$#', $path, $walletRoute)) {
+        $walletControlId = (int)$walletRoute[1];
+        if (!$walletControlId || !user_can_access_control($pdo, $userId, $walletControlId)) respond(['error' => 'Este espaço não está disponível para sua conta.'], 403);
+        $stmt = $pdo->prepare('SELECT CAST(id AS CHAR) AS id, name, type FROM financial_accounts WHERE control_id = ? ORDER BY name');
+        $stmt->execute([$walletControlId]);
+        respond(['wallets' => $stmt->fetchAll()]);
+    }
+
     $captureKey = null;
     if ($method === 'POST' && in_array($path, ['chat', 'audio', 'upload', 'transactions'], true)) {
         $captureKey = capture_key($_SERVER['HTTP_IDEMPOTENCY_KEY'] ?? null);
@@ -219,6 +227,21 @@ try {
         if (!$updated) respond(['error' => 'Nenhum lançamento correspondente foi atualizado.'], 404);
         add_message($pdo, $userId, $controlId, 'assistant', "Atualizei {$updated} lançamento(s) selecionado(s).");
         respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
+    }
+
+    if ($method === 'POST' && $path === 'transactions/move') {
+        $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
+        $move = move_transactions_to_control(
+            $pdo,
+            $userId,
+            $controlId,
+            (int)($body['destinationControlId'] ?? 0),
+            $body
+        );
+        respond(array_merge(
+            build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])),
+            ['move' => $move]
+        ));
     }
 
     if ($method === 'POST' && preg_match('#^transactions/([^/]+)/(confirm|dismiss|remove|update|paid|restore)$#', $path, $matches)) {
@@ -1364,6 +1387,165 @@ function bulk_update_transactions(PDO $pdo, int $controlId, array $changes): int
     return $count;
 }
 
+function expand_move_rows(array $rows, array $ids): array
+{
+    $selectedIds = array_fill_keys(array_map('strval', $ids), true);
+    $byId = [];
+    foreach ($rows as $row) if (($row['status'] ?? '') !== 'dismissed') $byId[(string)$row['id']] = $row;
+    if (count(array_intersect_key($selectedIds, $byId)) !== count($selectedIds)) {
+        throw new CaptureRequestError('Um ou mais lançamentos não foram encontrados neste espaço.', 404);
+    }
+    $groupIds = [];
+    foreach ($selectedIds as $id => $_) {
+        $groupId = trim((string)($byId[$id]['recurrenceGroupId'] ?? ''));
+        if ($groupId !== '') $groupIds[$groupId] = true;
+    }
+    return array_values(array_filter($rows, fn($row) => ($row['status'] ?? '') !== 'dismissed'
+        && (isset($selectedIds[(string)$row['id']]) || isset($groupIds[(string)($row['recurrenceGroupId'] ?? '')]))));
+}
+
+function move_transactions_to_control(PDO $pdo, int $userId, int $sourceControlId, int $destinationControlId, array $body): array
+{
+    $rawIds = $body['ids'] ?? [];
+    if (!is_array($rawIds) || count($rawIds) > 100 || count(array_filter($rawIds, fn($id) => is_string($id) || is_int($id))) !== count($rawIds)) {
+        throw new CaptureRequestError('Selecione de 1 a 100 lançamentos válidos.', 400);
+    }
+    $ids = array_values(array_unique(array_map('strval', $rawIds)));
+    if (!$ids || count($ids) > 100 || count(array_filter($ids, fn($id) => preg_match('/^\d{1,20}$/', $id))) !== count($ids)) {
+        throw new CaptureRequestError('Selecione de 1 a 100 lançamentos válidos.', 400);
+    }
+    if (!$destinationControlId || $destinationControlId === $sourceControlId) {
+        throw new CaptureRequestError('Escolha outro espaço como destino.', 400);
+    }
+
+    $ownsTransaction = !$pdo->inTransaction();
+    if ($ownsTransaction) $pdo->beginTransaction();
+    try {
+        $stmt = $pdo->prepare('SELECT control_id, role FROM control_members WHERE user_id = ? AND control_id IN (?, ?)');
+        $stmt->execute([$userId, $sourceControlId, $destinationControlId]);
+        $members = $stmt->fetchAll();
+        if (count($members) !== 2 || count(array_filter($members, fn($member) => !in_array($member['role'], ['owner', 'editor'], true))) > 0) {
+            throw new CaptureRequestError('Você precisa ter permissão de edição nos dois espaços para mover lançamentos.', 403);
+        }
+        $stmt = $pdo->prepare('SELECT name FROM financial_controls WHERE id = ? LIMIT 1');
+        $stmt->execute([$destinationControlId]);
+        $destinationName = (string)$stmt->fetchColumn();
+        if ($destinationName === '') throw new CaptureRequestError('O espaço de destino não foi encontrado.', 404);
+
+        $idSlots = implode(',', array_fill(0, count($ids), '?'));
+        $selectColumns = "SELECT CAST(t.id AS CHAR) AS id, t.status, CAST(t.account_id AS CHAR) AS accountId,
+            a.name AS accountName, t.recurrence_group_id AS recurrenceGroupId,
+            COALESCE(c.name, 'Outros') AS categoryName, t.kind
+            FROM transactions t
+            LEFT JOIN financial_accounts a ON a.id = t.account_id
+            LEFT JOIN categories c ON c.id = t.category_id";
+        $stmt = $pdo->prepare($selectColumns . " WHERE t.control_id = ? AND t.status <> 'dismissed' AND t.id IN ({$idSlots}) FOR UPDATE");
+        $stmt->execute([$sourceControlId, ...$ids]);
+        $selectedRows = $stmt->fetchAll();
+        if (count($selectedRows) !== count($ids)) throw new CaptureRequestError('Um ou mais lançamentos não foram encontrados neste espaço.', 404);
+
+        $groupIds = array_values(array_unique(array_filter(array_map(fn($row) => (string)($row['recurrenceGroupId'] ?? ''), $selectedRows))));
+        $groupSlots = $groupIds ? implode(',', array_fill(0, count($groupIds), '?')) : '';
+        $groupClause = $groupIds ? " OR t.recurrence_group_id IN ({$groupSlots})" : '';
+        $stmt = $pdo->prepare($selectColumns . " WHERE t.control_id = ? AND t.status <> 'dismissed' AND (t.id IN ({$idSlots}){$groupClause}) FOR UPDATE");
+        $stmt->execute([$sourceControlId, ...$ids, ...$groupIds]);
+        $rows = expand_move_rows($stmt->fetchAll(), $ids);
+        if (count($rows) > 500) throw new CaptureRequestError('A seleção inclui mais de 500 lançamentos. Divida a movimentação em grupos menores.', 400);
+
+        $stmt = $pdo->prepare('SELECT CAST(id AS CHAR) AS id, name FROM financial_accounts WHERE control_id = ? ORDER BY name');
+        $stmt->execute([$destinationControlId]);
+        $destinationWallets = $stmt->fetchAll();
+        $walletMode = (string)($body['walletMode'] ?? 'match');
+        $specificWalletId = null;
+        if ($walletMode === 'specific') {
+            $wantedId = (string)($body['destinationAccountId'] ?? '');
+            foreach ($destinationWallets as $wallet) if ((string)$wallet['id'] === $wantedId) $specificWalletId = $wantedId;
+            if ($specificWalletId === null) throw new CaptureRequestError('A carteira escolhida não pertence ao espaço de destino.', 400);
+        } elseif ($walletMode === 'named') {
+            $walletName = trim((string)($body['destinationAccountName'] ?? ''));
+            $matches = array_values(array_filter($destinationWallets, fn($wallet) => normalize_assistant_filter($wallet['name']) === normalize_assistant_filter($walletName)));
+            if (count($matches) !== 1) throw new CaptureRequestError(count($matches) > 1 ? 'Há mais de uma carteira com esse nome no espaço de destino.' : "Não encontrei a carteira “{$walletName}” no espaço de destino.", count($matches) > 1 ? 409 : 404);
+            $specificWalletId = (string)$matches[0]['id'];
+        } elseif (!in_array($walletMode, ['match', 'none'], true)) {
+            throw new CaptureRequestError('A opção de carteira é inválida.', 400);
+        }
+
+        $categoryIds = [];
+        $unassignedWalletCount = 0;
+        foreach ($rows as $row) {
+            $categoryName = trim((string)($row['categoryName'] ?? '')) ?: 'Outros';
+            $categoryKind = $row['kind'] === 'income' ? 'income' : 'expense';
+            $categoryKey = $categoryKind . ':' . normalize_assistant_filter($categoryName);
+            if (!isset($categoryIds[$categoryKey])) {
+                $stmt = $pdo->prepare('SELECT id FROM categories WHERE control_id = ? AND name = ? AND kind = ? LIMIT 1');
+                $stmt->execute([$destinationControlId, $categoryName, $categoryKind]);
+                $categoryId = $stmt->fetchColumn();
+                if (!$categoryId) {
+                    $stmt = $pdo->prepare('INSERT IGNORE INTO categories (control_id, user_id, name, kind) VALUES (?, ?, ?, ?)');
+                    $stmt->execute([$destinationControlId, $userId, $categoryName, $categoryKind]);
+                    $stmt = $pdo->prepare('SELECT id FROM categories WHERE control_id = ? AND name = ? AND kind = ? LIMIT 1');
+                    $stmt->execute([$destinationControlId, $categoryName, $categoryKind]);
+                    $categoryId = $stmt->fetchColumn();
+                }
+                if (!$categoryId) throw new CaptureRequestError('Não consegui preparar as categorias no espaço de destino.', 500);
+                $categoryIds[$categoryKey] = (int)$categoryId;
+            }
+
+            $accountId = $specificWalletId;
+            if ($walletMode === 'match') {
+                $accountId = null;
+                if (!empty($row['accountId'])) {
+                    $matches = array_values(array_filter($destinationWallets, fn($wallet) => normalize_assistant_filter($wallet['name']) === normalize_assistant_filter($row['accountName'] ?? '')));
+                    if (count($matches) === 1) $accountId = (string)$matches[0]['id'];
+                    else $unassignedWalletCount++;
+                }
+            } elseif ($walletMode === 'none') {
+                $accountId = null;
+            }
+
+            $stmt = $pdo->prepare("UPDATE transactions SET control_id = ?, account_id = ?, category_id = ? WHERE id = ? AND control_id = ? AND status <> 'dismissed'");
+            $stmt->execute([$destinationControlId, $accountId, $categoryIds[$categoryKey], $row['id'], $sourceControlId]);
+            if ($stmt->rowCount() !== 1) throw new CaptureRequestError('Um lançamento mudou durante a transferência. Nada foi movido; atualize a tela e tente novamente.', 409);
+        }
+
+        // Upload receipts retain the original scope so retries stay idempotent after moves.
+        $docConditions = implode(' OR ', array_fill(0, count($rows), "JSON_CONTAINS(capture_data, JSON_QUOTE(?), '$.transactionIds')"));
+        $stmt = $pdo->prepare("SELECT capture_data FROM capture_requests WHERE operation = 'upload' AND capture_data IS NOT NULL AND JSON_VALID(capture_data) AND ({$docConditions})");
+        $stmt->execute(array_map(fn($row) => (string)$row['id'], $rows));
+        $documentIds = [];
+        foreach ($stmt->fetchAll() as $receipt) {
+            $capture = json_decode((string)$receipt['capture_data'], true);
+            $documentId = is_array($capture) ? (string)($capture['documentId'] ?? '') : '';
+            if (!preg_match('/^\d{1,20}$/', $documentId)) continue;
+            $relatedIds = array_values(array_unique(array_filter(array_map('strval', is_array($capture['transactionIds'] ?? null) ? $capture['transactionIds'] : []), fn($id) => preg_match('/^\d{1,20}$/', $id))));
+            if (!$relatedIds) continue;
+            $relatedSlots = implode(',', array_fill(0, count($relatedIds), '?'));
+            $stmt = $pdo->prepare("SELECT id FROM transactions WHERE id IN ({$relatedSlots}) AND status <> 'dismissed' AND control_id <> ? LIMIT 1");
+            $stmt->execute([...$relatedIds, $destinationControlId]);
+            if (!$stmt->fetchColumn()) $documentIds[$documentId] = true;
+        }
+        $movedDocumentCount = 0;
+        if ($documentIds) {
+            $documentIds = array_keys($documentIds);
+            $docSlots = implode(',', array_fill(0, count($documentIds), '?'));
+            $stmt = $pdo->prepare("UPDATE documents SET control_id = ? WHERE control_id = ? AND id IN ({$docSlots})");
+            $stmt->execute([$destinationControlId, $sourceControlId, ...$documentIds]);
+            $movedDocumentCount = $stmt->rowCount();
+        }
+
+        if ($ownsTransaction) $pdo->commit();
+        return [
+            'movedCount' => count($rows),
+            'movedDocumentCount' => $movedDocumentCount,
+            'unassignedWalletCount' => $unassignedWalletCount,
+            'destinationName' => $destinationName,
+        ];
+    } catch (Throwable $error) {
+        if ($ownsTransaction && $pdo->inTransaction()) $pdo->rollBack();
+        throw $error;
+    }
+}
+
 function add_document(PDO $pdo, int $userId, int $controlId, array $document): void
 {
     $stmt = $pdo->prepare('INSERT INTO documents (control_id, user_id, original_name, stored_name, mime_type, status) VALUES (?, ?, ?, ?, ?, ?)');
@@ -1608,11 +1790,14 @@ function process_financial_message(PDO $pdo, int $userId, int $controlId, string
 {
     add_message($pdo, $userId, $controlId, 'user', $message);
     $data = read_data($pdo, $userId, $controlId);
-    $assistantResult = run_financial_assistant($message, $data, $env);
+    $controls = list_controls($pdo, $userId);
+    $assistantResult = run_financial_assistant($message, $data, $env, $controls, $controlId);
     $captureIds = [];
 
     if (($assistantResult['kind'] ?? '') === 'update_transactions') {
         $assistant = apply_assistant_transaction_update($pdo, $controlId, $assistantResult, $data);
+    } elseif (($assistantResult['kind'] ?? '') === 'move_transactions') {
+        $assistant = apply_assistant_transaction_move($pdo, $userId, $controlId, $assistantResult, $data, $controls);
     } elseif (($assistantResult['kind'] ?? '') === 'transactions') {
         $saved = [];
         foreach (attach_recurrence_group($assistantResult['transactions'], $message) as $transaction) {
@@ -1710,6 +1895,39 @@ function apply_assistant_transaction_update(PDO $pdo, int $controlId, array $res
     return 'Atualizei ' . count($targets) . ' lançamento(s) de “' . $description . '” com ' . implode(' e ', $adjustments) . '.';
 }
 
+function apply_assistant_transaction_move(PDO $pdo, int $userId, int $controlId, array $result, array $data, array $controls): string
+{
+    $groupId = trim((string)($result['recurrenceGroupId'] ?? ''));
+    $requestedIds = array_values(array_unique(array_map('strval', $result['transactionIds'] ?? [])));
+    $active = array_values(array_filter($data['transactions'] ?? [], fn($item) => ($item['status'] ?? '') !== 'dismissed'));
+    if ($groupId !== '') {
+        $targets = array_values(array_filter($active, fn($item) => (string)($item['recurrenceGroupId'] ?? '') === $groupId));
+    } else {
+        $targets = array_values(array_filter($active, fn($item) => in_array((string)$item['id'], $requestedIds, true)));
+        if (!$requestedIds || count($targets) !== count($requestedIds)) return 'Não consegui confirmar quais lançamentos você quer mover. Confira o espaço atual e tente novamente.';
+    }
+    if (!$targets) return 'Não encontrei esses lançamentos no espaço atual. Para mover pelo chat, primeiro abra o espaço onde eles estão.';
+
+    $destinationId = (int)($result['destinationControlId'] ?? 0);
+    $destination = null;
+    foreach ($controls as $control) {
+        if ((int)($control['id'] ?? 0) === $destinationId && in_array($control['role'] ?? '', ['owner', 'editor'], true)) $destination = $control;
+    }
+    if (!$destination || $destinationId === $controlId) return 'Não encontrei um espaço de destino disponível para sua conta. Confira os espaços em Configurações.';
+
+    $walletName = trim((string)($result['destinationAccountName'] ?? ''));
+    $move = move_transactions_to_control($pdo, $userId, $controlId, $destinationId, [
+        'ids' => $groupId !== '' ? [(string)$targets[0]['id']] : $requestedIds,
+        'walletMode' => $walletName !== '' ? 'named' : 'match',
+        'destinationAccountName' => $walletName,
+    ]);
+    $message = 'Movi ' . $move['movedCount'] . ($move['movedCount'] === 1 ? ' lançamento' : ' lançamentos') . ' para o espaço ' . $move['destinationName'] . '.';
+    if ($groupId !== '') $message .= ' A série recorrente foi movida inteira.';
+    if (!empty($move['unassignedWalletCount'])) $message .= ' ' . $move['unassignedWalletCount'] . ($move['unassignedWalletCount'] === 1 ? ' lançamento ficou' : ' lançamentos ficaram') . ' sem carteira porque não havia correspondência pelo nome.';
+    if (!empty($move['movedDocumentCount'])) $message .= ' Também movi ' . $move['movedDocumentCount'] . ($move['movedDocumentCount'] === 1 ? ' comprovante vinculado.' : ' comprovantes vinculados.');
+    return $message;
+}
+
 function transcribe_audio_with_openai(string $path, string $mimeType, string $filename, array $env): string
 {
     $apiKey = trim((string)($env['OPENAI_API_KEY'] ?? ''));
@@ -1741,7 +1959,7 @@ function transcribe_audio_with_openai(string $path, string $mimeType, string $fi
     return trim((string)($payload['text'] ?? ''));
 }
 
-function run_financial_assistant(string $message, array $data, array $env): ?array
+function run_financial_assistant(string $message, array $data, array $env, array $controls = [], int $activeControlId = 0): ?array
 {
     $apiKey = trim((string)($env['OPENAI_API_KEY'] ?? ''));
     if ($apiKey === '' || !function_exists('curl_init')) return null;
@@ -1767,7 +1985,7 @@ function run_financial_assistant(string $message, array $data, array $env): ?arr
             $payload = openai_response_request($baseUrl, $apiKey, [
                 'model' => $model,
                 'store' => false,
-                'instructions' => financial_assistant_instructions($data['wallets'] ?? []),
+                'instructions' => financial_assistant_instructions($data['wallets'] ?? [], $controls, $activeControlId),
                 'input' => $input,
                 'tools' => financial_assistant_tools(),
                 'tool_choice' => 'auto',
@@ -1844,6 +2062,32 @@ function run_financial_assistant(string $message, array $data, array $env): ?arr
                         'amount' => isset($args['amount']) && is_numeric($args['amount']) ? (float)$args['amount'] : null,
                     ];
                 }
+
+                if (($call['name'] ?? '') === 'move_transactions') {
+                    $transactionIds = array_slice(array_map('strval', is_array($args['transaction_ids'] ?? null) ? $args['transaction_ids'] : []), 0, 100);
+                    $groupId = trim((string)($args['recurrence_group_id'] ?? ''));
+                    $destinationControlId = trim((string)($args['destination_control_id'] ?? ''));
+                    $destination = null;
+                    foreach ($controls as $control) {
+                        if ((string)($control['id'] ?? '') === $destinationControlId && in_array($control['role'] ?? '', ['owner', 'editor'], true)) $destination = $control;
+                    }
+                    $authorized = $groupId !== ''
+                        ? isset($queriedRecurrenceGroups[$groupId])
+                        : ($transactionIds && !array_diff($transactionIds, array_keys($queriedTransactionIds)));
+                    if (!$authorized) {
+                        return ['kind' => 'answer', 'answer' => 'Não consegui localizar com segurança os lançamentos que você quer mover. Diga a descrição e o espaço de origem.'];
+                    }
+                    if (!$destination || $destinationControlId === (string)$activeControlId) {
+                        return ['kind' => 'answer', 'answer' => 'Não encontrei um espaço de destino disponível. Confira os espaços que aparecem no topo do app.'];
+                    }
+                    return [
+                        'kind' => 'move_transactions',
+                        'transactionIds' => $transactionIds,
+                        'recurrenceGroupId' => $groupId ?: null,
+                        'destinationControlId' => $destinationControlId,
+                        'destinationAccountName' => trim((string)($args['destination_account_name'] ?? '')) ?: null,
+                    ];
+                }
             }
         }
     } catch (Throwable $error) {
@@ -1870,12 +2114,17 @@ function openai_response_request(string $baseUrl, string $apiKey, array $body): 
     return is_array($payload) ? $payload : null;
 }
 
-function financial_assistant_instructions(array $wallets = []): string
+function financial_assistant_instructions(array $wallets = [], array $controls = [], int $activeControlId = 0): string
 {
     $today = date('Y-m-d');
     $walletNames = array_values(array_unique(array_filter(array_map(fn($wallet) => trim((string)($wallet['name'] ?? '')), $wallets))));
+    $spaces = array_values(array_filter($controls, fn($control) => (string)($control['id'] ?? '') !== (string)$activeControlId && in_array($control['role'] ?? '', ['owner', 'editor'], true)));
+    $activeSpace = null;
+    foreach ($controls as $control) if ((int)($control['id'] ?? 0) === $activeControlId) $activeSpace = $control;
+    $spaceNames = array_map(fn($control) => trim((string)($control['name'] ?? '')) . ' [' . (string)$control['id'] . ']', $spaces);
     return "Você é o assistente financeiro pessoal do Finup e conversa em português do Brasil. "
         . "Hoje é {$today}, no fuso America/Recife. Interprete datas relativas usando essa referência. "
+        . 'Espaço ativo: ' . ($activeSpace['name'] ?? 'não identificado') . ' [' . $activeControlId . ']. Espaços são controles financeiros independentes; carteiras são contas dentro de um espaço. Mover um lançamento corrige o local do registro e não cria débitos ou créditos novos. '
         . 'Use propose_transactions quando o usuário quiser registrar receitas, despesas, contas, parcelas ou recorrências. '
         . 'Nunca invente valor, data, categoria ou recorrência. Se faltar um dado essencial, pergunte de forma curta. '
         . 'Forma de pagamento e estabelecimento são opcionais: use null e não faça outra pergunta apenas por esses campos. '
@@ -1886,7 +2135,9 @@ function financial_assistant_instructions(array $wallets = []): string
         . 'Use query_finances para responder qualquer pergunta sobre lançamentos, totais, períodos, categorias, comparações ou contas a pagar. '
         . 'Para corrigir carteira ou valor de lançamentos existentes, consulte primeiro com query_finances e depois use update_transactions com os IDs retornados ou o recurrence_group_id da série. '
         . 'Quando o usuário disser todos, série, parcelas, mensalidades ou recorrências, atualize o grupo inteiro; não altere apenas uma ocorrência. '
-        . 'Carteiras disponíveis neste controle: ' . ($walletNames ? implode(', ', $walletNames) : 'nenhuma') . '. Ao mover, use o nome exato da carteira informado pelo usuário; se não estiver claro, pergunte antes. '
+        . 'Para mover lançamentos para outro espaço, consulte primeiro o controle ativo com query_finances e use move_transactions somente depois de identificar os itens. A origem é sempre o espaço ativo; se o usuário indicar outra origem, peça para ele trocar para esse espaço antes. Ao mover um lançamento recorrente, mova a série inteira. '
+        . 'Espaços de destino disponíveis: ' . ($spaceNames ? implode(', ', $spaceNames) : 'nenhum') . '. Nunca invente IDs de espaços. '
+        . 'Carteiras disponíveis neste controle: ' . ($walletNames ? implode(', ', $walletNames) : 'nenhuma') . '. Ao mover para outro espaço, use destination_account_name apenas se o usuário indicar uma carteira de destino; caso contrário use null para associar pelo mesmo nome. Se o espaço de destino ou os lançamentos forem ambíguos, pergunte antes. '
         . 'Para contas a pagar use status scheduled e date_basis due. Para comparar meses, consulte o intervalo completo e agrupe por month. '
         . 'Para quanto gastei, recebi e resultado realizado, use status settled (confirmed e paid, sem contas futuras) e date_basis transaction. Só inclua scheduled em previsões ou consultas explícitas de contas em aberto. '
         . 'Não afirme que registrou algo antes de chamar propose_transactions. Os lançamentos propostos ainda serão confirmados pelo usuário. '
@@ -1955,6 +2206,21 @@ function financial_assistant_tools(): array
                     'amount' => ['type' => ['number', 'null']],
                 ],
                 'required' => ['transaction_ids', 'recurrence_group_id', 'account_name', 'amount'],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'type' => 'function', 'name' => 'move_transactions',
+            'description' => 'Move lançamentos já localizados por query_finances do espaço ativo para outro espaço ao qual o usuário tem acesso de edição.', 'strict' => true,
+            'parameters' => [
+                'type' => 'object',
+                'properties' => [
+                    'transaction_ids' => ['type' => 'array', 'items' => ['type' => 'string'], 'maxItems' => 100],
+                    'recurrence_group_id' => $nullableString,
+                    'destination_control_id' => ['type' => 'string'],
+                    'destination_account_name' => $nullableString,
+                ],
+                'required' => ['transaction_ids', 'recurrence_group_id', 'destination_control_id', 'destination_account_name'],
                 'additionalProperties' => false,
             ],
         ],

@@ -2,7 +2,7 @@ import { normalizeAssistantTransactions } from "./parser.js";
 
 const allowedStatuses = new Set(["confirmed", "paid", "scheduled"]);
 
-export async function runFinancialAssistant({ message, history, transactions, wallets = [], now = new Date() }) {
+export async function runFinancialAssistant({ message, history, transactions, wallets = [], controls = [], activeControlId = null, now = new Date() }) {
   if (!process.env.OPENAI_API_KEY) return null;
 
   const baseUrl = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
@@ -17,7 +17,7 @@ export async function runFinancialAssistant({ message, history, transactions, wa
       const payload = await createResponse(baseUrl, {
         model,
         store: false,
-        instructions: assistantInstructions(now, wallets),
+        instructions: assistantInstructions(now, wallets, controls, activeControlId),
         input,
         tools,
         tool_choice: "auto",
@@ -68,6 +68,26 @@ export async function runFinancialAssistant({ message, history, transactions, wa
             recurrenceGroupId,
             accountName: args.account_name || null,
             amount: Number(args.amount) > 0 ? Number(args.amount) : null
+          };
+        }
+
+        if (call.name === "move_transactions") {
+          const transactionIds = Array.isArray(args.transaction_ids) ? args.transaction_ids.map(String).slice(0, 100) : [];
+          const recurrenceGroupId = args.recurrence_group_id || null;
+          const destinationControlId = String(args.destination_control_id || "");
+          const destination = controls.find((control) => String(control.id) === destinationControlId && ["owner", "editor"].includes(control.role));
+          if (recurrenceGroupId ? !queriedRecurrenceGroups.has(recurrenceGroupId) : !transactionIds.length || transactionIds.some((id) => !queriedTransactionIds.has(id))) {
+            return { kind: "answer", answer: "Não consegui localizar com segurança os lançamentos que você quer mover. Diga a descrição e o espaço de origem." };
+          }
+          if (!destination || destinationControlId === String(activeControlId)) {
+            return { kind: "answer", answer: "Não encontrei um espaço de destino disponível. Confira os espaços que aparecem no topo do app." };
+          }
+          return {
+            kind: "move_transactions",
+            transactionIds,
+            recurrenceGroupId,
+            destinationControlId,
+            destinationAccountName: args.destination_account_name || null
           };
         }
       }
@@ -159,12 +179,15 @@ function recentConversation(history, message) {
   return messages;
 }
 
-function assistantInstructions(now, wallets) {
+function assistantInstructions(now, wallets, controls, activeControlId) {
   const today = now.toISOString().slice(0, 10);
   const walletNames = [...new Set((wallets || []).map((wallet) => String(wallet.name || "").trim()).filter(Boolean))];
+  const spaces = (controls || []).filter((control) => String(control.id) !== String(activeControlId) && ["owner", "editor"].includes(control.role));
+  const activeSpace = (controls || []).find((control) => String(control.id) === String(activeControlId));
   return [
     "Você é o assistente financeiro pessoal do Finup e conversa em português do Brasil.",
     `Hoje é ${today}, no fuso America/Recife. Interprete datas relativas usando essa referência.`,
+    `Espaço ativo: ${activeSpace?.name || "não identificado"} [${activeControlId}]. Espaços são controles financeiros independentes; carteiras são contas dentro de um espaço. Mover um lançamento corrige o local do registro e não cria débitos ou créditos novos.`,
     "Use propose_transactions quando o usuário quiser registrar receitas, despesas, contas, parcelas ou recorrências.",
     "Nunca invente valor, data, categoria ou recorrência. Se faltar um dado essencial, pergunte de forma curta.",
     "Forma de pagamento e estabelecimento são opcionais: use null e não faça outra pergunta apenas por esses campos.",
@@ -175,7 +198,9 @@ function assistantInstructions(now, wallets) {
     "Use query_finances para responder qualquer pergunta sobre lançamentos, totais, períodos, categorias, comparações ou contas a pagar.",
     "Para corrigir carteira ou valor de lançamentos existentes, consulte primeiro com query_finances e depois use update_transactions com os IDs retornados ou o recurrence_group_id da série.",
     "Quando o usuário disser todos, série, parcelas, mensalidades ou recorrências, atualize o grupo inteiro; não altere apenas uma ocorrência.",
-    `Carteiras disponíveis neste controle: ${walletNames.length ? walletNames.join(", ") : "nenhuma"}. Ao mover, use o nome exato da carteira informado pelo usuário; se não estiver claro, pergunte antes.`,
+    "Para mover lançamentos para outro espaço, primeiro consulte o controle ativo com query_finances e use move_transactions somente depois de identificar os itens. A origem é sempre o espaço ativo; se o usuário indicar outra origem, peça para ele trocar para esse espaço antes. Ao mover um lançamento recorrente, mova a série inteira.",
+    `Espaços de destino disponíveis: ${spaces.length ? spaces.map((control) => `${control.name} [${control.id}]`).join(", ") : "nenhum"}. Nunca invente IDs de espaços.`,
+    `Carteiras disponíveis neste controle: ${walletNames.length ? walletNames.join(", ") : "nenhuma"}. Ao mover para outro espaço, use destination_account_name apenas se o usuário indicar uma carteira de destino; caso contrário use null para associar pelo mesmo nome. Se o espaço de destino ou os lançamentos forem ambíguos, pergunte antes.`,
     "Para contas a pagar use status scheduled e date_basis due. Para comparar meses, consulte o intervalo completo e agrupe por month.",
     "Para quanto gastei, recebi e resultado realizado, use status settled (confirmed e paid, sem contas futuras) e date_basis transaction. Só inclua scheduled em previsões ou consultas explícitas de contas em aberto.",
     "Não afirme que registrou algo antes de chamar propose_transactions. Os lançamentos propostos ainda serão confirmados pelo usuário.",
@@ -259,6 +284,23 @@ function financialTools() {
           amount: { type: ["number", "null"] }
         },
         required: ["transaction_ids", "recurrence_group_id", "account_name", "amount"],
+        additionalProperties: false
+      }
+    },
+    {
+      type: "function",
+      name: "move_transactions",
+      description: "Move lançamentos já localizados por query_finances do espaço ativo para outro espaço ao qual o usuário tem acesso de edição.",
+      strict: true,
+      parameters: {
+        type: "object",
+        properties: {
+          transaction_ids: { type: "array", items: { type: "string" }, maxItems: 100 },
+          recurrence_group_id: nullableString,
+          destination_control_id: { type: "string" },
+          destination_account_name: nullableString
+        },
+        required: ["transaction_ids", "recurrence_group_id", "destination_control_id", "destination_account_name"],
         additionalProperties: false
       }
     }

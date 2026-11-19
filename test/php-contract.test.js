@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 const apiPath = fileURLToPath(new URL("../api.php", import.meta.url));
 test("PHP input contract matches the manual entry flow without opening a database", (t) => {
   const php = String.raw`
-    $wanted = ['normalize_transaction_changes', 'normalize_date', 'add_months_to_iso_date', 'analyze_transactions_for_assistant', 'normalize_assistant_filter', 'assistant_transaction_date', 'is_iso_date', 'build_pdf_ocr_payload', 'openai_response_output_text', 'normalize_pdf_ocr_result'];
+    require dirname($argv[1]) . '/app/capture-requests.php';
+    $wanted = ['normalize_transaction_changes', 'normalize_date', 'add_months_to_iso_date', 'analyze_transactions_for_assistant', 'normalize_assistant_filter', 'assistant_transaction_date', 'is_iso_date', 'build_pdf_ocr_payload', 'openai_response_output_text', 'normalize_pdf_ocr_result', 'expand_move_rows'];
     $tokens = token_get_all(file_get_contents($argv[1]));
     for ($i = 0; $i < count($tokens); $i++) {
       if (!is_array($tokens[$i]) || $tokens[$i][0] !== T_FUNCTION) continue;
@@ -16,7 +17,7 @@ test("PHP input contract matches the manual entry flow without opening a databas
         $text = is_array($token) ? $token[1] : $token;
         if (!$name && is_array($token) && $token[0] === T_STRING) $name = $text;
         $code .= $text;
-        if ($token === '{') { $depth++; $started = true; }
+        if ($token === '{' || (is_array($token) && in_array($token[0], [T_CURLY_OPEN, T_DOLLAR_OPEN_CURLY_BRACES], true))) { $depth++; $started = true; }
         if ($token === '}') $depth--;
         if ($started && $depth === 0) break;
       }
@@ -32,10 +33,12 @@ test("PHP input contract matches the manual entry flow without opening a databas
     $pdfFile = $pdfPayload['input'][1]['content'][1];
     $pdfText = openai_response_output_text(['output' => [['type' => 'message', 'content' => [['type' => 'output_text', 'text' => '{"intent":"question"}']]]]]);
     $pdfAmbiguous = normalize_pdf_ocr_result(['intent' => 'transaction', 'transaction' => ['kind' => 'expense', 'financialStatus' => 'unclear', 'amount' => 120, 'transactionDate' => '2026-11-18', 'confidence' => 0.95]], 'fatura.pdf', '2026-11-18');
-    echo json_encode(['amount' => $normalized['amount'], 'date' => add_months_to_iso_date('2026-01-31', 1), 'invalidRejected' => $invalidRejected, 'settledTotal' => $query['summary']['expenses'], 'pdfModel' => $pdfPayload['model'], 'pdfStore' => $pdfPayload['store'], 'pdfFormat' => $pdfPayload['text']['format']['type'], 'pdfFilename' => $pdfFile['filename'], 'pdfData' => $pdfFile['file_data'], 'pdfDetail' => $pdfFile['detail'], 'pdfText' => $pdfText, 'pdfAmbiguousIntent' => $pdfAmbiguous['intent']]);
+    $moveRows = [['id' => '10', 'status' => 'confirmed', 'recurrenceGroupId' => 'school'], ['id' => '11', 'status' => 'scheduled', 'recurrenceGroupId' => 'school'], ['id' => '12', 'status' => 'paid', 'recurrenceGroupId' => null]];
+    $moveIds = array_column(expand_move_rows($moveRows, ['10']), 'id');
+    echo json_encode(['amount' => $normalized['amount'], 'date' => add_months_to_iso_date('2026-01-31', 1), 'invalidRejected' => $invalidRejected, 'settledTotal' => $query['summary']['expenses'], 'pdfModel' => $pdfPayload['model'], 'pdfStore' => $pdfPayload['store'], 'pdfFormat' => $pdfPayload['text']['format']['type'], 'pdfFilename' => $pdfFile['filename'], 'pdfData' => $pdfFile['file_data'], 'pdfDetail' => $pdfFile['detail'], 'pdfText' => $pdfText, 'pdfAmbiguousIntent' => $pdfAmbiguous['intent'], 'moveIds' => $moveIds]);
   `;
   const result = spawnSync("php", ["-r", php, apiPath], { encoding: "utf8" });
   if (result.error?.code === "ENOENT") { t.skip("PHP runtime not available"); return; }
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { amount: 1234.56, date: "2026-02-28", invalidRejected: true, settledTotal: 15, pdfModel: "gpt-4.1-nano", pdfStore: false, pdfFormat: "json_object", pdfFilename: "boleto.pdf", pdfData: "data:application/pdf;base64,JVBERi0xLjQ=", pdfDetail: "high", pdfText: '{"intent":"question"}', pdfAmbiguousIntent: "question" });
+  assert.deepEqual(JSON.parse(result.stdout), { amount: 1234.56, date: "2026-02-28", invalidRejected: true, settledTotal: 15, pdfModel: "gpt-4.1-nano", pdfStore: false, pdfFormat: "json_object", pdfFilename: "boleto.pdf", pdfData: "data:application/pdf;base64,JVBERi0xLjQ=", pdfDetail: "high", pdfText: '{"intent":"question"}', pdfAmbiguousIntent: "question", moveIds: ["10", "11"] });
 });

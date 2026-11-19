@@ -4,21 +4,24 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { monthlyOccurrences } from "../src/transaction-input.js";
-import { localDate } from "../public/ui-model.js";
+import { localDate, moveTargets } from "../public/ui-model.js";
 
 // Isolated UI fixture: never loads .env, connects to a database or calls an AI provider.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
 const today = localDate();
 const createdAt = new Date().toISOString();
-const session = { user: { id: "demo", name: "Pessoa de teste", email: "demo@example.test" }, activeControlId: "home", controls: [{ id: "home", name: "Casa" }, { id: "work", name: "Trabalho" }] };
+const session = { user: { id: "demo", name: "Pessoa de teste", email: "demo@example.test" }, activeControlId: "home", controls: [{ id: "home", name: "Casa", role: "owner" }, { id: "work", name: "Trabalho", role: "editor" }] };
 const transactions = [
   { id: "bread", kind: "expense", status: "confirmed", description: "Pão no mercadinho", amount: 15, category: "Mercado", transactionDate: today, createdAt },
   { id: "salary", kind: "income", status: "paid", description: "Salário", amount: 5000, category: "Renda", transactionDate: today, createdAt },
   { id: "internet", kind: "expense", status: "scheduled", description: "Internet", amount: 120, category: "Moradia", transactionDate: today, dueDate: today, createdAt },
   { id: "old", kind: "expense", status: "pending", description: "Farmácia (rascunho anterior)", amount: 49.9, category: "Saúde", transactionDate: today, createdAt }
-];
+].map((item) => ({ ...item, controlId: "home" }));
+transactions.push(...monthlyOccurrences({ amount: "900", description: "Mensalidade da escola", transactionDate: today, category: "Educação", accountId: "bank", repeatCount: "3", paymentState: "scheduled", dueDate: today }, "school-series").map((item, index) => ({ ...item, id: "school-" + index, controlId: "home", status: index === 2 ? "pending" : "scheduled", accountName: "Conta principal", createdAt })));
 const messages = [{ id: "welcome", role: "assistant", content: "Olá! O que você quer registrar ou consultar hoje?", createdAt }];
 const wallets = [{ id: "cash", name: "Dinheiro", type: "cash", balance: 120, openingBalance: 120 }, { id: "bank", name: "Conta principal", type: "checking", balance: 3000, openingBalance: 3000 }];
+const workWallets = [{ id: "work-bank", name: "Conta principal", type: "checking", balance: 0, openingBalance: 0 }, { id: "work-cash", name: "Caixa", type: "cash", balance: 0, openingBalance: 0 }];
+const walletsFor = (id) => id === "home" ? wallets : workWallets;
 let loggedIn = true;
 const receipts = new Map();
 let dropFirstCapture = process.env.PREVIEW_DROP_ONCE === "1";
@@ -28,7 +31,8 @@ function state(capture) {
     const date = new Date(start.getFullYear(), start.getMonth() + index, 1);
     return { key: localDate(date).slice(0, 7), shortLabel: new Intl.DateTimeFormat("pt-BR", { month: "short" }).format(date) };
   });
-  return { session, transactions: transactions.filter((item) => !["dismissed", "pending"].includes(item.status)), pendingTransactions: transactions.filter((item) => item.status === "pending"), documents: [], messages, wallets, summary: { monthlySeries }, ...(capture ? { capture } : {}) };
+  const current = transactions.filter((item) => item.controlId === session.activeControlId);
+  return { session, transactions: current.filter((item) => !["dismissed", "pending"].includes(item.status)), pendingTransactions: current.filter((item) => item.status === "pending"), documents: [], messages, wallets: walletsFor(session.activeControlId), summary: { monthlySeries }, ...(capture ? { capture } : {}) };
 }
 const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 const server = createServer(async (req, res) => {
@@ -69,13 +73,28 @@ const server = createServer(async (req, res) => {
     if (url.pathname.startsWith("/api/auth/")) { loggedIn = !url.pathname.endsWith("/logout"); return json(session); }
     if (url.pathname === "/api/state") return json(state());
     if (url.pathname === "/api/controls/select") { session.activeControlId = body.controlId; return json(session); }
+    const controlWallets = url.pathname.match(/^\/api\/controls\/([^/]+)\/wallets$/);
+    if (controlWallets) return json({ wallets: walletsFor(controlWallets[1]) });
+    if (url.pathname === "/api/transactions/move") {
+      const destination = session.controls.find((item) => item.id === body.destinationControlId);
+      if (!destination || destination.id === session.activeControlId) return json({ error: "Escolha outro espaço." }, 400);
+      const items = moveTargets(transactions.filter((item) => item.controlId === session.activeControlId), body.ids);
+      const destinationWallets = walletsFor(destination.id);
+      let unassignedWalletCount = 0;
+      for (const item of items) {
+        const wallet = body.walletMode === "specific" ? destinationWallets.find((entry) => entry.id === body.destinationAccountId) : body.walletMode === "none" ? null : destinationWallets.find((entry) => entry.name === item.accountName);
+        if (!wallet && item.accountId && body.walletMode === "match") unassignedWalletCount += 1;
+        item.controlId = destination.id; item.accountId = wallet?.id || null; item.accountName = wallet?.name || null;
+      }
+      return json({ ...state(), move: { movedCount: items.length, movedDocumentCount: 0, unassignedWalletCount, destinationName: destination.name } });
+    }
     if (url.pathname === "/api/transactions" || url.pathname === "/api/chat") {
       if (url.pathname.endsWith("/chat") && !/\d/.test(body.message)) {
         messages.push({ id: crypto.randomUUID(), role: "user", content: body.message, createdAt }, { id: crypto.randomUUID(), role: "assistant", content: "Você tem uma conta de internet de R$ 120,00 para hoje.", createdAt });
         return json(state({ transactionIds: [] }));
       }
       const values = url.pathname.endsWith("/chat") ? { amount: "15", description: "Pão no mercadinho", transactionDate: today, category: "Mercado" } : body;
-      const items = monthlyOccurrences(values, crypto.randomUUID()).map((item) => ({ ...item, id: crypto.randomUUID(), createdAt, accountName: wallets.find((wallet) => wallet.id === item.accountId)?.name }));
+      const items = monthlyOccurrences(values, crypto.randomUUID()).map((item) => ({ ...item, id: crypto.randomUUID(), controlId: session.activeControlId, createdAt, accountName: walletsFor(session.activeControlId).find((wallet) => wallet.id === item.accountId)?.name }));
       transactions.unshift(...items);
       messages.push({ id: crypto.randomUUID(), role: "assistant", content: "Preparei seu lançamento. Confira antes de salvar.", createdAt });
       return json(state({ transactionIds: items.map((item) => item.id) }));

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { analyzeTransactions } from "../src/assistant.js";
+import { analyzeTransactions, runFinancialAssistant } from "../src/assistant.js";
 import { normalizeAssistantTransactions } from "../src/parser.js";
 
 const transactions = [
@@ -73,4 +73,102 @@ test("normalizes month-based recurrence even when proposed dates are weekly", ()
   );
 
   assert.deepEqual(normalized.map((item) => item.dueDate), ["2026-09-30", "2026-10-30", "2026-11-30"]);
+});
+
+test("only offers a chat move after finding the transaction and an editable destination", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.OPENAI_API_KEY;
+  const requests = [];
+  process.env.OPENAI_API_KEY = "test-key";
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    requests.push(body);
+    const output = requests.length === 1
+      ? [{ type: "function_call", name: "query_finances", call_id: "query-1", arguments: JSON.stringify({
+          kind: "expense", status: "all", date_basis: "auto", start_date: null, end_date: null,
+          category: null, search: "supermercado", account_name: null, group_by: "none", limit: 20
+        }) }]
+      : [{ type: "function_call", name: "move_transactions", call_id: "move-1", arguments: JSON.stringify({
+          transaction_ids: ["2"], recurrence_group_id: null, destination_control_id: "12", destination_account_name: null
+        }) }];
+    return { ok: true, json: async () => ({ output }) };
+  };
+
+  try {
+    const result = await runFinancialAssistant({
+      message: "Mova o supermercado para Casa",
+      history: [],
+      transactions,
+      wallets: [],
+      controls: [{ id: "10", name: "Atual", role: "owner" }, { id: "12", name: "Casa", role: "editor" }],
+      activeControlId: "10",
+      now: new Date("2026-11-18T12:00:00Z")
+    });
+    assert.equal(result.kind, "move_transactions");
+    assert.equal(result.destinationControlId, "12");
+    assert.equal(result.transactionIds[0], "2");
+    assert.equal(requests.length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  }
+});
+
+test("assistant refuses a move to a viewer-only space", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.OPENAI_API_KEY;
+  let calls = 0;
+  process.env.OPENAI_API_KEY = "test-key";
+  globalThis.fetch = async () => {
+    calls += 1;
+    const output = calls === 1
+      ? [{ type: "function_call", name: "query_finances", call_id: "query-1", arguments: JSON.stringify({
+          kind: "expense", status: "all", date_basis: "auto", start_date: null, end_date: null,
+          category: null, search: "supermercado", account_name: null, group_by: "none", limit: 20
+        }) }]
+      : [{ type: "function_call", name: "move_transactions", call_id: "move-1", arguments: JSON.stringify({
+          transaction_ids: ["2"], recurrence_group_id: null, destination_control_id: "12", destination_account_name: null
+        }) }];
+    return { ok: true, json: async () => ({ output }) };
+  };
+
+  try {
+    const result = await runFinancialAssistant({
+      message: "Mova o supermercado para Casa", history: [], transactions, wallets: [],
+      controls: [{ id: "10", name: "Atual", role: "owner" }, { id: "12", name: "Casa", role: "viewer" }],
+      activeControlId: "10", now: new Date("2026-11-18T12:00:00Z")
+    });
+    assert.equal(result.kind, "answer");
+    assert.match(result.answer, /destino disponível/);
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  }
+});
+
+test("assistant refuses to move an identifier that was not queried", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-key";
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ output: [{
+    type: "function_call", name: "move_transactions", call_id: "move-1", arguments: JSON.stringify({
+      transaction_ids: ["2"], recurrence_group_id: null, destination_control_id: "12", destination_account_name: null
+    })
+  }] }) });
+  try {
+    const result = await runFinancialAssistant({
+      message: "Mova o supermercado para Casa", history: [], transactions,
+      controls: [{ id: "10", name: "Atual", role: "owner" }, { id: "12", name: "Casa", role: "editor" }],
+      activeControlId: "10"
+    });
+    assert.equal(result.kind, "answer");
+    assert.match(result.answer, /localizar com segurança/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  }
 });

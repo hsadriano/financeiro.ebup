@@ -1,4 +1,4 @@
-import { localDate, groupDrafts, captureDrafts, seriesTargets, filterLedger, settledTotals } from "/ui-model.js?v=20261118-1";
+import { localDate, groupDrafts, captureDrafts, seriesTargets, moveTargets, filterLedger, settledTotals } from "/ui-model.js?v=20261118-3";
 import { LocalCaptures, localContext, attemptBody, remainingDraft } from "/local-captures.js?v=20261118-2";
 
 const $ = (id) => document.getElementById(id);
@@ -11,7 +11,8 @@ const icons = () => window.lucide?.createIcons({ attrs: { "stroke-width": 1.8, "
 const state = {
   session: null, data: null, panel: "home", back: "home", busy: false, captureIds: [],
   selected: new Set(), selecting: false, billFilter: "open", category: "expense",
-  detailId: null, bulkAnchor: null, audio: null, stream: null, chunks: [], timer: null,
+  detailId: null, bulkAnchor: null, moveIds: [], moveWallets: null, moveWalletRequest: 0, moveLoading: false,
+  audio: null, stream: null, chunks: [], timer: null,
   ledgerLimit: 50, documentLimit: 50, messageLimit: 60,
   audioOrigin: "capture", chatDrafts: new Map(),
   authMode: new URLSearchParams(location.search).has("reset") ? "reset" : "login",
@@ -67,6 +68,9 @@ async function task(action, target) {
   finally {
     state.busy = false;
     all("[data-unlock]").forEach((button) => { button.disabled = false; delete button.dataset.unlock; });
+    $("bulk-edit").disabled = !state.selected.size;
+    $("move-selected").disabled = !state.selected.size;
+    if ($("move-dialog").open) previewMove();
   }
 }
 
@@ -126,6 +130,13 @@ all("dialog").forEach((dialog) => {
 
 function activeSpace() {
   return state.session?.controls?.find((control) => String(control.id) === String(state.session.activeControlId))?.name || "Meu espaço";
+}
+function editableMoveDestinations() {
+  return (state.session?.controls || []).filter((control) => String(control.id) !== String(state.session?.activeControlId) && ["owner", "editor"].includes(control.role));
+}
+function canMoveBetweenControls() {
+  const active = (state.session?.controls || []).find((control) => String(control.id) === String(state.session?.activeControlId));
+  return Boolean(active && ["owner", "editor"].includes(active.role) && editableMoveDestinations().length);
 }
 function currentLocalContext() {
   return state.session?.user ? localContext(state.session.user.id, state.session.activeControlId) : null;
@@ -238,6 +249,8 @@ function renderSession() {
   $("user-name").textContent = state.session?.user?.name || "";
   $("control-select").innerHTML = (state.session?.controls || []).map((control) => '<option value="' + escape(control.id) + '">' + escape(control.name) + "</option>").join("");
   $("control-select").value = state.session?.activeControlId || "";
+  $("ledger-space-label").textContent = "Espaço: " + activeSpace();
+  $("chat-space-label").textContent = "No espaço: " + activeSpace();
   $("profile-name").value = state.session?.user?.name || "";
   $("profile-email").value = state.session?.user?.email || "";
   $("control-name").value = activeSpace();
@@ -297,8 +310,10 @@ function renderLedger() {
   if (items.length > state.ledgerLimit) $("transactions").insertAdjacentHTML("beforeend", '<button type="button" class="text-button" data-more="ledger">Mostrar mais lançamentos</button>');
   $("selection-toggle").textContent = state.selecting ? "Concluir" : "Selecionar";
   $("selection-bar").hidden = !state.selecting;
-  $("selection-count").textContent = state.selected.size + " selecionados";
+  $("selection-count").textContent = state.selected.size + (state.selected.size === 1 ? " selecionado" : " selecionados");
   $("bulk-edit").disabled = !state.selected.size;
+  $("move-selected").hidden = !canMoveBetweenControls();
+  $("move-selected").disabled = !state.selected.size;
   const selectedWallet = $("ledger-wallet").value;
   $("ledger-wallet").innerHTML = wallets(selectedWallet, "Todas");
   $("ledger-wallet").value = state.filters.wallet;
@@ -576,7 +591,7 @@ function openDetail(id) {
   if (item.status !== "pending") {
     $("detail-title").textContent = "Detalhes";
     form.hidden = true;
-    form.insertAdjacentHTML("beforebegin", '<section id="detail-summary"><p class="eyebrow">' + escape(item.category) + '</p><h2>' + escape(item.description) + '</h2><strong class="capture-value ' + item.kind + '">' + money(item.amount) + '</strong><p class="list-caption">' + date(item.dueDate || item.transactionDate) + " · " + escape(item.accountName || "Sem carteira") + '</p><button id="detail-edit-button" class="text-button" type="button">' + icon("pencil") + 'Editar dados</button></section>');
+    form.insertAdjacentHTML("beforebegin", '<section id="detail-summary"><p class="eyebrow">' + escape(item.category) + '</p><h2>' + escape(item.description) + '</h2><strong class="capture-value ' + item.kind + '">' + money(item.amount) + '</strong><p class="list-caption">' + date(item.dueDate || item.transactionDate) + " · " + escape(item.accountName || "Sem carteira") + '</p><button id="detail-edit-button" class="text-button" type="button">' + icon("pencil") + 'Editar dados</button>' + (canMoveBetweenControls() ? '<button id="detail-move-button" class="text-button" type="button">' + icon("folder-symlink") + 'Mover para outro espaço</button>' : "") + '</section>');
     $("detail-edit-button").onclick = () => {
       form.hidden = false; $("detail-summary").hidden = true;
       $("detail-title").textContent = "Editar lançamento";
@@ -597,6 +612,10 @@ function openDetail(id) {
     }, "detail-error");
   };
   if ($("detail-series")) $("detail-series").onclick = () => openBulk(item);
+  if ($("detail-move-button")) $("detail-move-button").onclick = () => {
+    $("detail-dialog").close();
+    openMove([id]);
+  };
   if ($("payment-form")) $("payment-form").onsubmit = (event) => {
     event.preventDefault();
     task(async () => {
@@ -643,6 +662,115 @@ $("bulk-form").onsubmit = (event) => {
     state.selected.clear(); state.selecting = false; renderLedger();
     toast(ids.length + " lançamentos atualizados.");
   }, "bulk-error");
+};
+
+function expandedMoveTargets(ids) {
+  return moveTargets([...(state.data?.transactions || []), ...(state.data?.pendingTransactions || [])], ids);
+}
+function previewMove() {
+  if (!state.data || !state.moveIds.length) { $("move-submit").disabled = true; return; }
+  const targets = expandedMoveTargets(state.moveIds);
+  const groups = new Set(targets.map((item) => item.recurrenceGroupId).filter(Boolean));
+  const pending = targets.filter((item) => item.status === "pending").length;
+  const form = $("move-form");
+  $("move-caption").textContent = "Origem: " + activeSpace() + ". " + targets.length + (targets.length === 1 ? " lançamento" : " lançamentos") + ", total de " + money(targets.reduce((sum, item) => sum + Number(item.amount), 0)) + ".";
+  $("move-preview").textContent = (groups.size ? groups.size + (groups.size === 1 ? " série inteira" : " séries inteiras") + ", incluindo parcelas de outros meses. " : "") + (pending ? "Inclui " + pending + (pending === 1 ? " rascunho. " : " rascunhos. ") : "") + "Valores, datas e situação serão mantidos.";
+  const choice = form.elements.walletChoice.value;
+  let walletNote = "";
+  if (state.moveLoading) walletNote = "Carregando carteiras do destino…";
+  else if (choice === "none") walletNote = "Todos os lançamentos ficarão sem carteira.";
+  else if (choice === "match" && state.moveWallets !== null) {
+    const normalize = (value) => String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+    const unmatched = targets.filter((item) => item.accountId && state.moveWallets.filter((wallet) => normalize(wallet.name) === normalize(item.accountName)).length !== 1);
+    walletNote = unmatched.length ? unmatched.length + (unmatched.length === 1 ? " lançamento ficará" : " lançamentos ficarão") + " sem carteira: não há uma carteira equivalente e única no destino." : "As carteiras serão associadas pelo mesmo nome; itens sem carteira continuarão assim.";
+  }
+  $("move-wallet-note").textContent = walletNote;
+  $("move-wallet-note").hidden = !walletNote;
+  $("move-submit").disabled = state.busy || state.moveLoading || !form.elements.destinationControlId.value || state.moveWallets === null || targets.length > 500 || state.moveIds.length > 100;
+}
+function openMove(ids) {
+  if (!canMoveBetweenControls()) { toast("Você precisa ter permissão de edição em dois espaços para mover lançamentos."); return; }
+  try {
+    state.moveIds = [...new Set(ids.map(String))];
+    state.moveWallets = null; state.moveLoading = false; state.moveWalletRequest += 1;
+    const targets = expandedMoveTargets(state.moveIds);
+    $("move-error").hidden = true;
+    $("move-wallet-retry").hidden = true;
+    $("move-form").reset();
+    const destination = $("move-form").elements.destinationControlId;
+    destination.innerHTML = '<option value="">Escolha um espaço</option>' + editableMoveDestinations().map((control) => '<option value="' + escape(control.id) + '">' + escape(control.name) + '</option>').join("");
+    $("move-wallet-mode").innerHTML = '<option value="match">Correspondência automática pelo nome</option><option value="none">Sem carteira</option>';
+    $("move-wallet-mode").disabled = false;
+    if (targets.length > 500) feedback("move-error", "A seleção inclui mais de 500 lançamentos. Divida a movimentação em grupos menores.", true);
+    else if (state.moveIds.length > 100) feedback("move-error", "Selecione no máximo 100 lançamentos por vez.", true);
+    previewMove(); openSheet("move-dialog");
+  } catch (error) { toast(error.message); }
+}
+async function loadMoveWallets(controlId) {
+  const requestId = ++state.moveWalletRequest;
+  const select = $("move-wallet-mode");
+  state.moveWallets = null; state.moveLoading = Boolean(controlId);
+  $("move-wallet-retry").hidden = true;
+  select.innerHTML = '<option value="match">Correspondência automática pelo nome</option><option value="none">Sem carteira</option>';
+  select.disabled = Boolean(controlId);
+  previewMove();
+  if (!controlId) return;
+  try {
+    const result = await request("/api/controls/" + encodeURIComponent(controlId) + "/wallets");
+    if (requestId !== state.moveWalletRequest) return;
+    state.moveWallets = result.wallets || [];
+    for (const wallet of state.moveWallets) {
+      select.insertAdjacentHTML("beforeend", '<option value="specific:' + escape(wallet.id) + '">Usar carteira: ' + escape(wallet.name) + '</option>');
+    }
+  } catch (error) {
+    if (requestId !== state.moveWalletRequest) return;
+    feedback("move-error", error.message, true);
+    $("move-wallet-retry").hidden = false;
+  } finally {
+    if (requestId === state.moveWalletRequest) { state.moveLoading = false; select.disabled = false; previewMove(); }
+  }
+}
+$("move-form").elements.destinationControlId.onchange = () => {
+  $("move-error").hidden = true;
+  loadMoveWallets($("move-form").elements.destinationControlId.value);
+};
+$("move-selected").onclick = () => openMove([...state.selected]);
+$("move-wallet-mode").onchange = previewMove;
+$("move-wallet-retry").onclick = () => {
+  $("move-error").hidden = true;
+  loadMoveWallets($("move-form").elements.destinationControlId.value);
+};
+$("move-dialog").addEventListener("close", () => { state.moveWalletRequest += 1; });
+$("move-form").onsubmit = (event) => {
+  event.preventDefault();
+  task(async () => {
+    const form = event.currentTarget;
+    const destinationControlId = form.elements.destinationControlId.value;
+    if (!destinationControlId) throw new Error("Escolha o espaço de destino.");
+    if (state.moveLoading || state.moveWallets === null) throw new Error("Aguarde o carregamento das carteiras do destino.");
+    if (state.moveIds.length > 100) throw new Error("Selecione no máximo 100 lançamentos por vez.");
+    const targets = expandedMoveTargets(state.moveIds);
+    if (targets.length > 500) throw new Error("A seleção inclui mais de 500 lançamentos. Divida a movimentação em grupos menores.");
+    const walletChoice = form.elements.walletChoice.value;
+    const body = { ids: state.moveIds, destinationControlId, walletMode: "match" };
+    if (walletChoice === "none") body.walletMode = "none";
+    else if (walletChoice.startsWith("specific:")) {
+      body.walletMode = "specific";
+      body.destinationAccountId = walletChoice.slice("specific:".length);
+    }
+    const result = await request("/api/transactions/move", body);
+    render(result);
+    $("move-dialog").close();
+    if ($("detail-dialog").open) $("detail-dialog").close();
+    state.selected.clear(); state.selecting = false; state.moveIds = [];
+    renderLedger();
+    const move = result.move || {};
+    const movedCount = move.movedCount || targets.length;
+    let message = movedCount + (movedCount === 1 ? " lançamento movido para " : " lançamentos movidos para ") + (move.destinationName || "o outro espaço") + ".";
+    if (move.unassignedWalletCount) message += " " + move.unassignedWalletCount + " sem carteira equivalente.";
+    if (move.movedDocumentCount) message += " Comprovantes vinculados também foram movidos.";
+    toast(message);
+  }, "move-error");
 };
 
 $("chat-form").onsubmit = (event) => { event.preventDefault(); sendChat($("message-input").value.trim()); };

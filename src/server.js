@@ -123,6 +123,11 @@ const server = createServer((request, response) => runStorageContext(async () =>
       return sendJson(response, await sessionPayload({ userId: session.userId, activeControlId: controlId }));
     }
 
+    const controlWalletRoute = url.pathname.match(/^\/api\/controls\/(\d+)\/wallets$/);
+    if (request.method === "GET" && controlWalletRoute) {
+      return sendJson(response, { wallets: await storage.walletsForControl(controlWalletRoute[1], session.userId) });
+    }
+
     if (request.method === "POST" && url.pathname === "/api/controls/share") {
       const body = await readJson(request);
       await shareControl(session.userId, session.activeControlId, String(body.email || "").trim());
@@ -170,7 +175,7 @@ const server = createServer((request, response) => runStorageContext(async () =>
       const body = await readJson(request);
       const message = String(body.message || "").trim();
       if (!message) return sendJson(response, { error: "Mensagem vazia" }, 400);
-      return sendJson(response, await runCapture(request, "chat", body, null, () => processFinancialMessage(message)));
+      return sendJson(response, await runCapture(request, "chat", body, null, () => processFinancialMessage(message, session)));
     }
 
     if (request.method === "POST" && url.pathname === "/api/audio") {
@@ -179,7 +184,7 @@ const server = createServer((request, response) => runStorageContext(async () =>
       return sendJson(response, await runCapture(request, "audio", {}, file, async () => {
         const message = await transcribeAudio(file);
         if (!message) throw Object.assign(new Error("Não consegui identificar fala nesse áudio."), { status: 422 });
-        return processFinancialMessage(message);
+        return processFinancialMessage(message, session);
       }));
     }
 
@@ -213,6 +218,19 @@ const server = createServer((request, response) => runStorageContext(async () =>
       if (!updated) return sendJson(response, { error: "Nenhum lançamento correspondente foi atualizado." }, 404);
       await storage.addMessage({ role: "assistant", content: `Atualizei ${updated} lançamento(s) selecionado(s).` });
       return sendJson(response, buildState(await storage.read()));
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/transactions/move") {
+      const body = await readJson(request);
+      const ids = Array.isArray(body.ids) ? body.ids : [];
+      const move = await storage.moveTransactionsToControl({
+        ids,
+        destinationControlId: body.destinationControlId,
+        walletMode: String(body.walletMode || "match"),
+        destinationAccountId: body.destinationAccountId,
+        destinationAccountName: body.destinationAccountName
+      });
+      return sendJson(response, { ...buildState(await storage.read()), move });
     }
 
     if (request.method === "POST" && url.pathname.startsWith("/api/transactions/")) {
@@ -337,20 +355,25 @@ async function createStorage() {
   return database;
 }
 
-async function processFinancialMessage(message) {
+async function processFinancialMessage(message, session) {
   await storage.addMessage({ role: "user", content: message });
   const data = await storage.read();
   const captureIds = [];
+  const controls = await listControls(session.userId);
   const assistantResult = await runFinancialAssistant({
     message,
     history: data.messages,
     transactions: data.transactions,
-    wallets: data.wallets
+    wallets: data.wallets,
+    controls,
+    activeControlId: session.activeControlId
   });
 
   let assistantContent;
   if (assistantResult?.kind === "update_transactions") {
     assistantContent = await applyAssistantTransactionUpdate(assistantResult, data);
+  } else if (assistantResult?.kind === "move_transactions") {
+    assistantContent = await applyAssistantTransactionMove(assistantResult, data, controls);
   } else if (assistantResult?.kind === "transactions") {
     const saved = [];
     const groupedTransactions = attachRecurrenceGroup(assistantResult.transactions, message);
@@ -444,6 +467,37 @@ async function applyAssistantTransactionUpdate(result, data) {
   const description = targets[0].description.replace(/\s+\(\d+\/\d+\)$/, "");
   const adjustment = [accountId !== undefined ? `carteira ${data.wallets.find((wallet) => String(wallet.id) === String(accountId)).name}` : "", amount !== undefined ? `valor ${moneyLabel(amount)}` : ""].filter(Boolean).join(" e ");
   return `Atualizei ${targets.length} lançamento(s) de “${description}” com ${adjustment}.`;
+}
+
+async function applyAssistantTransactionMove(result, data, controls) {
+  const recurrenceGroupId = result.recurrenceGroupId ? String(result.recurrenceGroupId) : null;
+  const requestedIds = [...new Set((result.transactionIds || []).map(String))];
+  const activeTransactions = data.transactions.filter((item) => item.status !== "dismissed");
+  let targets;
+  if (recurrenceGroupId) {
+    targets = activeTransactions.filter((item) => String(item.recurrenceGroupId || "") === recurrenceGroupId);
+  } else {
+    targets = activeTransactions.filter((item) => requestedIds.includes(String(item.id)));
+    if (!requestedIds.length || targets.length !== requestedIds.length) return "Não consegui confirmar quais lançamentos você quer mover. Confira o espaço atual e tente novamente.";
+  }
+  if (!targets.length) return "Não encontrei esses lançamentos no espaço atual. Para mover pelo chat, primeiro abra o espaço onde eles estão.";
+
+  const destination = controls.find((control) => String(control.id) === String(result.destinationControlId));
+  if (!destination || !["owner", "editor"].includes(destination.role) || String(destination.id) === String(storage.controlId)) {
+    return "Não encontrei um espaço de destino disponível para sua conta. Confira os espaços em Configurações.";
+  }
+  const move = await storage.moveTransactionsToControl({
+    ids: recurrenceGroupId ? [String(targets[0].id)] : requestedIds,
+    destinationControlId: destination.id,
+    walletMode: result.destinationAccountName ? "named" : "match",
+    destinationAccountName: result.destinationAccountName
+  });
+  const walletNote = move.unassignedWalletCount
+    ? ` ${move.unassignedWalletCount} ${move.unassignedWalletCount === 1 ? "lançamento ficou" : "lançamentos ficaram"} sem carteira porque não havia correspondência pelo nome.`
+    : "";
+  const seriesNote = recurrenceGroupId ? " A série recorrente foi movida inteira." : "";
+  const documentNote = move.movedDocumentCount ? ` Também movi ${move.movedDocumentCount} ${move.movedDocumentCount === 1 ? "comprovante vinculado" : "comprovantes vinculados"}.` : "";
+  return `Movi ${move.movedCount} ${move.movedCount === 1 ? "lançamento" : "lançamentos"} para o espaço ${move.destinationName}.${seriesNote}${walletNote}${documentNote}`;
 }
 
 function normalizeWalletName(value) {

@@ -45,6 +45,7 @@ Em hospedagem PHP/Apache, como Hostinger compartilhada, o projeto tambem roda di
 - Registro manual sem IA, com repetição mensal e ajuste ao último dia do mês.
 - Edição de lançamentos salvos, registro de pagamento/recebimento e remoção com desfazer.
 - Alteração de valor/carteira em seleção ou série: só este, este e os próximos, ou todos.
+- Movimentação de lançamentos entre espaços, individualmente, em seleção ou pelo chat.
 - Armazenamento em MariaDB quando `.env` estiver configurado.
 - Fallback local em `data/finance.json` quando não houver configuração de banco.
 - Schema MariaDB em `database/schema.sql`.
@@ -66,6 +67,33 @@ somente a primeira ocorrência é realizada; as próximas ficam em aberto.
 
 Os ícones Lucide 0.468.0 são distribuídos localmente em `public/lucide.min.js`,
 preservando a licença do pacote e sem depender de CDN no celular.
+
+## Mover lançamentos entre espaços
+
+Nos detalhes de um lançamento, use **Mover para outro espaço**. No Extrato,
+**Selecionar** permite mover vários de uma vez. A tela apresenta o total antes da
+confirmação e permite escolher a carteira no destino. No chat do espaço de origem,
+também é possível pedir: `Mova as mensalidades da escola para o espaço Casa`.
+
+Selecionar uma ocorrência move a série recorrente inteira, inclusive rascunhos
+vinculados, preservando IDs, valores, datas e situação. É necessário ter permissão
+de edição nos dois espaços. Categorias são associadas pelo nome e tipo, e criadas
+no destino quando necessário. Por padrão, carteiras são associadas por nome único;
+se não houver correspondência, o item fica sem carteira, com aviso na prévia.
+
+Comprovantes com vínculo de captura acompanham os registros quando todos os itens
+ativos daquele documento estiverem no destino. Arquivos antigos sem esse vínculo
+permanecem no espaço original. O objeto no armazenamento não é renomeado nem
+duplicado. A operação não cria novos lançamentos e não troca o espaço aberto.
+
+Para testar as duas implementações com tabelas temporárias no MariaDB local:
+
+```bash
+FINUP_TEST_MARIADB=1 node --test test/transaction-move-mariadb.test.js
+```
+
+Esse teste exige `DB_HOST` local, usa o `.env` existente e não altera as tabelas
+permanentes do app.
 
 ## Rascunhos e reenvio
 

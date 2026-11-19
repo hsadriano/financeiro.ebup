@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { executeCapture } from "./capture-requests.js";
+import { expandMoveRows, matchMoveWallet, normalizeMoveName } from "./transaction-move.js";
 
 const defaultUser = {
   name: "Usuario principal",
@@ -320,6 +321,181 @@ export class MariaDbStorage {
       [...assignmentParams, ...targetParams, this.controlId]
     );
     return count;
+  }
+
+  async walletsForControl(controlId, userId = this.userId) {
+    const [members] = await this.pool.execute(
+      "SELECT role FROM control_members WHERE user_id = ? AND control_id = ? LIMIT 1",
+      [userId, controlId]
+    );
+    if (!members.length) throw Object.assign(new Error("Este espaço não está disponível para sua conta."), { status: 403 });
+    const [wallets] = await this.pool.execute(
+      "SELECT CAST(id AS CHAR) AS id, name, type FROM financial_accounts WHERE control_id = ? ORDER BY name",
+      [controlId]
+    );
+    return wallets;
+  }
+
+  async moveTransactionsToControl({
+    ids = [], destinationControlId, walletMode = "match", destinationAccountId = null, destinationAccountName = null
+  }) {
+    const sourceControlId = this.controlId;
+    const userId = this.userId;
+    if (!Array.isArray(ids) || ids.length > 100 || ids.some((id) => !["string", "number"].includes(typeof id) || (typeof id === "number" && !Number.isSafeInteger(id)))) {
+      throw Object.assign(new Error("Selecione de 1 a 100 lançamentos válidos."), { status: 400 });
+    }
+    const transactionIds = [...new Set(ids.map(String))];
+    if (!transactionIds.length || transactionIds.length > 100 || transactionIds.some((id) => !/^\d{1,20}$/.test(id))) {
+      throw Object.assign(new Error("Selecione de 1 a 100 lançamentos válidos."), { status: 400 });
+    }
+    if (!/^\d{1,20}$/.test(String(destinationControlId || "")) || String(sourceControlId) === String(destinationControlId)) {
+      throw Object.assign(new Error("Escolha outro espaço como destino."), { status: 400 });
+    }
+
+    const requestPool = this.requestContext.getStore()?.pool;
+    const insideCapture = Boolean(requestPool && requestPool !== this.defaultPool);
+    const connection = insideCapture ? requestPool : await this.defaultPool.getConnection();
+    try {
+      if (!insideCapture) await connection.beginTransaction();
+      const [members] = await connection.execute(
+        "SELECT control_id AS controlId, role FROM control_members WHERE user_id = ? AND control_id IN (?, ?)",
+        [userId, sourceControlId, destinationControlId]
+      );
+      if (members.length !== 2 || members.some((member) => !["owner", "editor"].includes(member.role))) {
+        throw Object.assign(new Error("Você precisa ter permissão de edição nos dois espaços para mover lançamentos."), { status: 403 });
+      }
+      const [destinationRows] = await connection.execute(
+        "SELECT name FROM financial_controls WHERE id = ? LIMIT 1",
+        [destinationControlId]
+      );
+      if (!destinationRows.length) throw Object.assign(new Error("O espaço de destino não foi encontrado."), { status: 404 });
+
+      const placeholders = transactionIds.map(() => "?").join(", ");
+      const selectedSql = `SELECT CAST(t.id AS CHAR) AS id, t.status, CAST(t.account_id AS CHAR) AS accountId,
+          a.name AS accountName, t.recurrence_group_id AS recurrenceGroupId,
+          COALESCE(c.name, 'Outros') AS categoryName, t.kind
+        FROM transactions t
+        LEFT JOIN financial_accounts a ON a.id = t.account_id
+        LEFT JOIN categories c ON c.id = t.category_id
+        WHERE t.control_id = ? AND t.status <> 'dismissed' AND t.id IN (${placeholders}) FOR UPDATE`;
+      const [selectedRows] = await connection.execute(selectedSql, [sourceControlId, ...transactionIds]);
+      if (selectedRows.length !== transactionIds.length) {
+        throw Object.assign(new Error("Um ou mais lançamentos não foram encontrados neste espaço."), { status: 404 });
+      }
+      const recurrenceIds = [...new Set(selectedRows.map((row) => row.recurrenceGroupId).filter(Boolean).map(String))];
+      const groupClause = recurrenceIds.length ? ` OR t.recurrence_group_id IN (${recurrenceIds.map(() => "?").join(", ")})` : "";
+      const candidateSql = `SELECT CAST(t.id AS CHAR) AS id, t.status, CAST(t.account_id AS CHAR) AS accountId,
+          a.name AS accountName, t.recurrence_group_id AS recurrenceGroupId,
+          COALESCE(c.name, 'Outros') AS categoryName, t.kind
+        FROM transactions t
+        LEFT JOIN financial_accounts a ON a.id = t.account_id
+        LEFT JOIN categories c ON c.id = t.category_id
+        WHERE t.control_id = ? AND t.status <> 'dismissed' AND (t.id IN (${placeholders})${groupClause}) FOR UPDATE`;
+      const [candidateRows] = await connection.execute(candidateSql, [sourceControlId, ...transactionIds, ...recurrenceIds]);
+      const rows = expandMoveRows(candidateRows, transactionIds);
+      if (rows.length > 500) throw Object.assign(new Error("A seleção inclui mais de 500 lançamentos. Divida a movimentação em grupos menores."), { status: 400 });
+
+      const [destinationWallets] = await connection.execute(
+        "SELECT CAST(id AS CHAR) AS id, name FROM financial_accounts WHERE control_id = ? ORDER BY name",
+        [destinationControlId]
+      );
+      let specificWallet = null;
+      if (walletMode === "specific") {
+        specificWallet = destinationWallets.find((wallet) => String(wallet.id) === String(destinationAccountId));
+        if (!specificWallet) throw Object.assign(new Error("A carteira escolhida não pertence ao espaço de destino."), { status: 400 });
+      } else if (walletMode === "named") {
+        const match = matchMoveWallet(destinationAccountName, destinationWallets);
+        if (match.ambiguous) throw Object.assign(new Error("Há mais de uma carteira com esse nome no espaço de destino."), { status: 409 });
+        if (!match.wallet) throw Object.assign(new Error(`Não encontrei a carteira “${destinationAccountName}” no espaço de destino.`), { status: 404 });
+        specificWallet = match.wallet;
+      } else if (!new Set(["match", "none"]).has(walletMode)) {
+        throw Object.assign(new Error("A opção de carteira é inválida."), { status: 400 });
+      }
+
+      const categoryIds = new Map();
+      let unassignedWalletCount = 0;
+      for (const row of rows) {
+        const categoryKey = `${row.kind}:${normalizeMoveName(row.categoryName)}`;
+        let categoryId = categoryIds.get(categoryKey);
+        if (!categoryId) {
+          const [existingCategories] = await connection.execute(
+            "SELECT id FROM categories WHERE control_id = ? AND name = ? AND kind = ? LIMIT 1",
+            [destinationControlId, row.categoryName || "Outros", row.kind]
+          );
+          if (existingCategories.length) categoryId = existingCategories[0].id;
+          else {
+            await connection.execute(
+              "INSERT IGNORE INTO categories (control_id, user_id, name, kind) VALUES (?, ?, ?, ?)",
+              [destinationControlId, userId, row.categoryName || "Outros", row.kind]
+            );
+            const [createdCategories] = await connection.execute(
+              "SELECT id FROM categories WHERE control_id = ? AND name = ? AND kind = ? LIMIT 1",
+              [destinationControlId, row.categoryName || "Outros", row.kind]
+            );
+            categoryId = createdCategories[0]?.id;
+          }
+          if (!categoryId) throw Object.assign(new Error("Não consegui preparar as categorias no espaço de destino."), { status: 500 });
+          categoryIds.set(categoryKey, categoryId);
+        }
+
+        let accountId = null;
+        if (walletMode === "specific" || walletMode === "named") accountId = specificWallet.id;
+        else if (walletMode === "match" && row.accountId) {
+          const match = matchMoveWallet(row.accountName, destinationWallets);
+          accountId = match.wallet?.id || null;
+          if (!accountId) unassignedWalletCount += 1;
+        }
+        const [updated] = await connection.execute(
+          "UPDATE transactions SET control_id = ?, account_id = ?, category_id = ? WHERE id = ? AND control_id = ? AND status <> 'dismissed'",
+          [destinationControlId, accountId, categoryId, row.id, sourceControlId]
+        );
+        if (Number(updated.affectedRows) !== 1) throw Object.assign(new Error("Um lançamento mudou durante a transferência. Nada foi movido; atualize a tela e tente novamente."), { status: 409 });
+      }
+
+      // Upload receipts keep their original scope for idempotency, even after a second move.
+      const documentConditions = rows.map(() => "JSON_CONTAINS(capture_data, JSON_QUOTE(?), '$.transactionIds')").join(" OR ");
+      const [receipts] = await connection.execute(
+        `SELECT capture_data FROM capture_requests
+         WHERE operation = 'upload' AND capture_data IS NOT NULL AND JSON_VALID(capture_data)
+           AND (${documentConditions})`,
+        rows.map((row) => String(row.id))
+      );
+      const documentIds = new Set();
+      for (const receipt of receipts) {
+        let capture;
+        try { capture = JSON.parse(receipt.capture_data); } catch { continue; }
+        if (!capture?.documentId || !/^\d{1,20}$/.test(String(capture.documentId))) continue;
+        const relatedIds = Array.isArray(capture.transactionIds) ? [...new Set(capture.transactionIds.map(String))].filter((id) => /^\d{1,20}$/.test(id)) : [];
+        if (!relatedIds.length) continue;
+        const [remaining] = await connection.execute(
+          `SELECT id FROM transactions WHERE id IN (${relatedIds.map(() => "?").join(", ")}) AND status <> 'dismissed' AND control_id <> ? LIMIT 1`,
+          [...relatedIds, destinationControlId]
+        );
+        if (!remaining.length) documentIds.add(String(capture.documentId));
+      }
+      let movedDocumentCount = 0;
+      if (documentIds.size) {
+        const documentPlaceholders = [...documentIds].map(() => "?").join(", ");
+        const [movedDocuments] = await connection.execute(
+          `UPDATE documents SET control_id = ? WHERE control_id = ? AND id IN (${documentPlaceholders})`,
+          [destinationControlId, sourceControlId, ...documentIds]
+        );
+        movedDocumentCount = Number(movedDocuments.affectedRows || 0);
+      }
+
+      if (!insideCapture) await connection.commit();
+      return {
+        movedCount: rows.length,
+        movedDocumentCount,
+        unassignedWalletCount,
+        destinationName: destinationRows[0].name
+      };
+    } catch (error) {
+      if (!insideCapture) await connection.rollback();
+      throw error;
+    } finally {
+      if (!insideCapture) connection.release();
+    }
   }
 
   async addDocument(document) {
