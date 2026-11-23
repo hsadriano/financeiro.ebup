@@ -11,7 +11,7 @@
     <link rel="icon" type="image/png" href="/finup-favicon.png" />
     <link rel="apple-touch-icon" href="/finup-logo.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/styles.css?v=20261118-3" />
+    <link rel="stylesheet" href="/styles.css?v=20261119-1" />
     <script src="/lucide.min.js?v=0.468.0" defer></script>
   </head>
   <body>
@@ -101,7 +101,7 @@
       <div id="capture-progress" class="progress-state" role="status" hidden><i data-lucide="loader-circle" class="spinner"></i><strong id="capture-progress-text">Preparando…</strong></div>
       <p id="capture-error" class="inline-feedback error" role="alert" hidden></p>
       <button id="capture-local-retry" class="text-button" type="button" hidden><i data-lucide="refresh-cw"></i>Ver envios neste aparelho</button>
-      <div id="capture-result" hidden><div id="capture-preview"></div><p class="list-caption" id="capture-result-note"></p><div class="sheet-actions"><button id="capture-edit" type="button"><i data-lucide="pencil"></i>Editar</button><button id="capture-save" class="primary" type="button"><i data-lucide="check"></i>Salvar</button></div><button id="capture-discard" class="text-button danger" type="button">Descartar esta captura</button></div>
+      <div id="capture-result" hidden><div id="capture-preview"></div><p class="list-caption" id="capture-result-note"></p><label id="capture-duplicate-check" class="check-row review-ack" hidden><input id="capture-duplicate-ack" type="checkbox" /><span>Conferi os possíveis duplicados e quero salvar mesmo assim.</span></label><div class="sheet-actions"><button id="capture-edit" type="button"><i data-lucide="pencil"></i>Editar</button><button id="capture-save" class="primary" type="button"><i data-lucide="check"></i>Salvar</button></div><button id="capture-discard" class="text-button danger" type="button">Descartar esta captura</button></div>
     </dialog>
     <dialog id="detail-dialog" class="sheet" aria-labelledby="detail-title"><header class="sheet-heading"><h1 id="detail-title">Lançamento</h1><button class="icon-button" type="button" data-close="detail-dialog" aria-label="Fechar detalhes" title="Fechar"><i data-lucide="x"></i></button></header><div id="detail-body"></div><p id="detail-error" class="inline-feedback error" role="alert" hidden></p></dialog>
     <dialog id="bulk-dialog" class="sheet" aria-labelledby="bulk-title"><header class="sheet-heading"><h1 id="bulk-title">Alterar lançamentos</h1><button class="icon-button" type="button" data-close="bulk-dialog" aria-label="Fechar alteração" title="Fechar"><i data-lucide="x"></i></button></header><form id="bulk-form" class="settings-form"><p id="bulk-caption"></p><label><span>Novo valor por lançamento</span><input name="amount" inputmode="decimal" placeholder="Manter valor atual" /></label><label><span>Carteira</span><select name="accountId"></select></label><label id="bulk-scope-label" hidden><span>Aplicar a</span><select name="scope"><option value="one">Só este lançamento</option><option value="next">Este e os próximos da série</option><option value="all">Toda a série</option></select></label><p id="bulk-preview" class="list-caption"></p><p id="bulk-error" class="inline-feedback error" role="alert" hidden></p><button type="submit" class="primary">Aplicar alterações</button></form></dialog>
@@ -110,6 +110,6 @@
     <div id="toast" class="toast" role="status" hidden><span id="toast-text"></span><button id="toast-action" class="text-button" type="button" hidden>Desfazer</button><button class="icon-button" type="button" id="toast-close" aria-label="Fechar aviso" title="Fechar aviso"><i data-lucide="x"></i></button></div>
     <input id="file-input" type="file" accept="image/*,.pdf,.txt,.csv" hidden /><input id="camera-input" type="file" accept="image/*" capture="environment" hidden />
     <datalist id="category-options"><option value="Mercado"></option><option value="Alimentação"></option><option value="Moradia"></option><option value="Transporte"></option><option value="Saúde"></option><option value="Educação"></option><option value="Lazer"></option><option value="Renda"></option><option value="Outros"></option></datalist>
-    <script src="/app.js?v=20261118-3" type="module"></script>
+    <script src="/app.js?v=20261119-1" type="module"></script>
   </body>
 </html>

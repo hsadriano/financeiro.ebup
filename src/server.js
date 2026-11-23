@@ -11,6 +11,7 @@ import { extractRecurrenceCount, hasPdfSignature, parseFinancialDocument, parseF
 import { runFinancialAssistant } from "./assistant.js";
 import { monthlyOccurrences, normalizeTransactionInput, validDate } from "./transaction-input.js";
 import { captureKey, captureFingerprint } from "./capture-requests.js";
+import { publicDocument, withTransactionReviews } from "./transaction-review.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -220,6 +221,11 @@ const server = createServer((request, response) => runStorageContext(async () =>
       return sendJson(response, buildState(await storage.read()));
     }
 
+    if (request.method === "POST" && url.pathname === "/api/transactions/confirm") {
+      const body = await readJson(request);
+      return await confirmReviewedTransactions(response, body?.ids || [], body?.reviewedDuplicateIds || []);
+    }
+
     if (request.method === "POST" && url.pathname === "/api/transactions/move") {
       const body = await readJson(request);
       const ids = Array.isArray(body.ids) ? body.ids : [];
@@ -241,6 +247,10 @@ const server = createServer((request, response) => runStorageContext(async () =>
 
       const existing = (await storage.read()).transactions.find((item) => String(item.id) === id);
       if (!existing || (existing.status === "dismissed" && action !== "restore")) return sendJson(response, { error: "Lançamento não encontrado." }, 404);
+      if (action === "confirm") {
+        const body = await readJson(request);
+        return await confirmReviewedTransactions(response, [id], body?.reviewedDuplicateIds || []);
+      }
 
       if (action === "update" || action === "paid") {
         const body = await readJson(request);
@@ -258,18 +268,13 @@ const server = createServer((request, response) => runStorageContext(async () =>
         return sendJson(response, buildState(await storage.read()));
       }
 
-      if (action === "confirm" && existing.status !== "pending") return sendJson(response, buildState(await storage.read()));
       if (action === "restore" && existing.status !== "dismissed") return sendJson(response, { error: "Este lançamento não foi removido." }, 400);
       const restoreBody = action === "restore" ? await readJson(request) : {};
-      let status = action === "restore" ? (["pending", "confirmed", "paid", "scheduled"].includes(restoreBody.status) ? restoreBody.status : "pending") : action === "confirm" ? "confirmed" : "dismissed";
-      let updated = await storage.updateTransactionStatus(id, status);
+      const status = action === "restore" ? (["pending", "confirmed", "paid", "scheduled"].includes(restoreBody.status) ? restoreBody.status : "pending") : "dismissed";
+      const updated = await storage.updateTransactionStatus(id, status);
       if (!updated) return sendJson(response, { error: "Lancamento nao encontrado" }, 404);
-      if (action === "confirm" && updated.dueDate) {
-        status = "scheduled";
-        updated = await storage.updateTransactionStatus(id, status);
-      }
 
-      const verb = action === "confirm" ? "confirmado" : action === "remove" ? "removido" : "descartado";
+      const verb = action === "remove" ? "removido" : "descartado";
       await storage.addMessage({ role: "assistant", content: `Lancamento ${verb}: ${updated.description}` });
       return sendJson(response, buildState(await storage.read()));
     }
@@ -282,6 +287,7 @@ const server = createServer((request, response) => runStorageContext(async () =>
         originalName: file.originalName,
         storedName: file.storedName,
         mimeType: file.mimeType,
+        contentHash: crypto.createHash("sha256").update(file.buffer).digest("hex"),
         status: "ocr_pending"
       });
 
@@ -291,6 +297,7 @@ const server = createServer((request, response) => runStorageContext(async () =>
       const parsed = await parseFinancialDocument(file.buffer, file.mimeType, file.originalName);
       if (parsed?.intent === "transaction") {
         const saved = await storage.addTransaction({ ...parsed.transaction, status: "pending" });
+        await storage.linkTransactionDocument(saved.id, document.id);
         transactionIds.push(saved.id);
         const friendlyName = documentNameFromTransaction(saved.description, document.originalName);
         await storage.updateDocumentName(document.id, friendlyName);
@@ -323,6 +330,15 @@ const server = createServer((request, response) => runStorageContext(async () =>
 
 function runStorageContext(action) {
   return storage.runContext ? storage.runContext(action) : action();
+}
+
+async function confirmReviewedTransactions(response, ids, reviewedDuplicateIds) {
+  const confirmation = await storage.confirmTransactions(ids, reviewedDuplicateIds);
+  const result = buildState(await storage.read());
+  if (confirmation.reviewRequired) {
+    return sendJson(response, { ...result, error: "Há possíveis duplicidades. Confira os registros encontrados antes de salvar.", code: "duplicate_review_required" }, 409);
+  }
+  return sendJson(response, { ...result, confirmation });
 }
 
 async function runCapture(request, operation, body, file, action) {
@@ -537,6 +553,7 @@ async function transcribeAudio(file) {
 }
 
 function buildState(data) {
+  data = withTransactionReviews(data);
   const now = new Date();
   const month = now.toISOString().slice(0, 7);
   const confirmedTransactions = data.transactions.filter((item) => ["confirmed", "paid", "scheduled"].includes(item.status));
@@ -557,7 +574,7 @@ function buildState(data) {
     transactions: confirmedTransactions.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
     wallets: data.wallets || [],
     pendingTransactions: pendingTransactions.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-    documents: data.documents.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    documents: data.documents.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(publicDocument),
     summary: {
       income,
       expenses,

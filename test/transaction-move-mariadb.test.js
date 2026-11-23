@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadEnv } from "../src/config.js";
 import { MariaDbStorage } from "../src/mariadb-storage.js";
+import { buildTransactionReviews } from "../src/transaction-review.js";
 
 const enabled = process.env.FINUP_TEST_MARIADB === "1";
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -14,8 +15,8 @@ async function withDatabase(action) {
   assert.ok(["localhost", "127.0.0.1", "::1"].includes(process.env.DB_HOST), "Temporary-table integration tests only connect locally");
   const mysql = await import("mysql2/promise");
   const connection = await mysql.createConnection({
-    host: process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306), database: process.env.DB_NAME,
-    user: process.env.DB_USER, password: process.env.DB_PASS || "", multipleStatements: true, decimalNumbers: true
+    host: process.env.DB_HOST === "localhost" ? "127.0.0.1" : process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306), database: process.env.DB_NAME,
+    user: process.env.DB_USER, password: process.env.DB_PASS || "", multipleStatements: true, decimalNumbers: true, connectTimeout: 5000
   });
   const wrapper = {
     execute: connection.execute.bind(connection), beginTransaction: connection.beginTransaction.bind(connection),
@@ -100,4 +101,81 @@ test("PHP performs the same transactional moves against isolated MariaDB tables"
   const result = spawnSync("php", [fileURLToPath(new URL("./php-transaction-move-harness.php", import.meta.url))], { encoding: "utf8", env: process.env });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.deepEqual(JSON.parse(result.stdout), { series: true, repeatedDocumentMove: true, category: true, viewer: true, wallet: true, rollback: true });
+});
+
+async function reviewCapture(connection) {
+  await connection.execute("INSERT INTO transactions (id,control_id,user_id,category_id,kind,status,description,amount,transaction_date,due_date,source,confidence) VALUES (106,1,1,12,'expense','pending','Mercado',100,'2026-11-10',NULL,'upload',0.72),(107,1,1,12,'expense','pending','Taxi',35,'2026-11-20','2026-11-20','manual',1)");
+  await connection.execute("INSERT INTO documents (id,control_id,user_id,original_name,stored_name,content_hash,status) VALUES (301,1,1,'Mercado.pdf','private/market.pdf',?,'review_pending')", ["b".repeat(64)]);
+}
+
+test("MariaDB review blocks an entire capture until its duplicate candidates are acknowledged", { skip: !enabled }, async () => {
+  await withDatabase(async ({ connection, storage }) => {
+    await reviewCapture(connection);
+    await storage.linkTransactionDocument("106", "301");
+    const review = buildTransactionReviews(await storage.read()).get("106");
+    assert.deepEqual(review.duplicateIds, ["103"]);
+    assert.equal(review.documents[0].id, "301");
+    assert.equal(review.issues[0].code, "check_interpretation");
+    assert.deepEqual(await storage.confirmTransactions(["106", "107"]), { confirmedCount: 0, reviewRequired: true });
+    const [pending] = await connection.execute("SELECT status FROM transactions WHERE id IN (106,107)");
+    assert.ok(pending.every((item) => item.status === "pending"));
+    assert.deepEqual(await storage.confirmTransactions(["106", "107"], ["103"]), { confirmedCount: 2, reviewRequired: false });
+    const [confirmed] = await connection.execute("SELECT id,status FROM transactions WHERE id IN (106,107) ORDER BY id");
+    assert.deepEqual(confirmed, [{ id: 106, status: "confirmed" }, { id: 107, status: "scheduled" }]);
+    assert.deepEqual(await storage.confirmTransactions(["106", "107"]), { confirmedCount: 0, reviewRequired: false });
+    const [[messageCount]] = await connection.execute("SELECT COUNT(*) AS count FROM chat_messages");
+    assert.equal(messageCount.count, 1);
+    storage.setContext(2, 1);
+    await assert.rejects(storage.confirmTransactions(["104"]), { status: 403 });
+    storage.setContext(1, 1);
+    await assert.rejects(storage.confirmTransactions(["105"]), { status: 404 });
+  });
+});
+
+test("MariaDB review detects candidates created after the user opened the capture", { skip: !enabled }, async () => {
+  await withDatabase(async ({ connection, storage }) => {
+    await reviewCapture(connection);
+    await connection.execute("INSERT INTO transactions (id,control_id,user_id,category_id,kind,status,description,amount,transaction_date) VALUES (108,1,1,12,'expense','confirmed','Mercado',100,'2026-11-10')");
+    const result = await storage.confirmTransactions(["106", "107"], ["103"]);
+    assert.equal(result.reviewRequired, true);
+    const [[other]] = await connection.execute("SELECT status FROM transactions WHERE id=107");
+    assert.equal(other.status, "pending");
+  });
+});
+
+test("MariaDB confirmation rolls back the entire capture if its final write fails", { skip: !enabled }, async () => {
+  await withDatabase(async ({ connection, storage, wrapper }) => {
+    await reviewCapture(connection);
+    const execute = wrapper.execute;
+    wrapper.execute = async (sql, args) => {
+      if (sql.includes("INSERT INTO chat_messages")) throw new Error("Simulated confirmation failure");
+      return execute(sql, args);
+    };
+    await assert.rejects(storage.confirmTransactions(["106", "107"], ["103"]), /confirmation failure/);
+    const [rows] = await connection.execute("SELECT status FROM transactions WHERE id IN (106,107)");
+    assert.ok(rows.every((item) => item.status === "pending"));
+  });
+});
+
+test("document-link backfill is repeatable and cannot link another space's records", { skip: !enabled }, async () => {
+  await withDatabase(async ({ connection, storage }) => {
+    await connection.execute("DELETE FROM transaction_documents");
+    await connection.execute("INSERT INTO capture_requests (control_id,user_id,operation,capture_data) VALUES (1,1,'upload',?)", [JSON.stringify({ transactionIds: ["105"], documentId: "201" })]);
+    await storage.backfillDocumentLinks();
+    await storage.backfillDocumentLinks();
+    await storage.linkTransactionDocument("105", "201");
+    const [links] = await connection.execute("SELECT transaction_id,document_id FROM transaction_documents ORDER BY transaction_id");
+    assert.deepEqual(links, [{ transaction_id: 101, document_id: 201 }, { transaction_id: 102, document_id: 201 }, { transaction_id: 103, document_id: 202 }, { transaction_id: 104, document_id: 202 }]);
+    await storage.moveTransactionsToControl({ ids: ["101"], destinationControlId: "2" });
+    storage.setContext(1, 2);
+    const moved = (await storage.read()).transactions.find((item) => item.id === "101");
+    assert.deepEqual(moved.documentIds, ["201"]);
+  });
+});
+
+test("PHP confirms reviewed captures atomically with scoped document links", { skip: !enabled }, async () => {
+  await loadEnv(root);
+  const result = spawnSync("php", [fileURLToPath(new URL("./php-transaction-review-harness.php", import.meta.url))], { encoding: "utf8", env: process.env });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.deepEqual(JSON.parse(result.stdout), { duplicates: true, atomic: true, idempotent: true, stale: true, scope: true, links: true });
 });

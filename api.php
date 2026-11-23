@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 require_once __DIR__ . '/app/capture-requests.php';
+require_once __DIR__ . '/app/transaction-review.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -229,6 +230,15 @@ try {
         respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
     }
 
+    if ($method === 'POST' && $path === 'transactions/confirm') {
+        $body = json_decode((string)file_get_contents('php://input'), true);
+        if (!is_array($body)) respond(['error' => 'Solicitação de conferência inválida.'], 400);
+        $confirmation = confirm_reviewed_transactions($pdo, $userId, $controlId, $body['ids'] ?? [], $body['reviewedDuplicateIds'] ?? []);
+        $result = build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId]));
+        if ($confirmation['reviewRequired']) respond(array_merge($result, ['error' => 'Há possíveis duplicidades. Confira os registros encontrados antes de salvar.', 'code' => 'duplicate_review_required']), 409);
+        respond(array_merge($result, ['confirmation' => $confirmation]));
+    }
+
     if ($method === 'POST' && $path === 'transactions/move') {
         $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
         $move = move_transactions_to_control(
@@ -248,6 +258,13 @@ try {
         $existing = null;
         foreach (read_data($pdo, $userId, $controlId)['transactions'] as $item) if ($item['id'] === $matches[1]) $existing = $item;
         if (!$existing || ($existing['status'] === 'dismissed' && $matches[2] !== 'restore')) respond(['error' => 'Lançamento não encontrado.'], 404);
+        if ($matches[2] === 'confirm') {
+            $body = json_decode((string)file_get_contents('php://input'), true);
+            $confirmation = confirm_reviewed_transactions($pdo, $userId, $controlId, [$matches[1]], is_array($body) ? ($body['reviewedDuplicateIds'] ?? []) : []);
+            $result = build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId]));
+            if ($confirmation['reviewRequired']) respond(array_merge($result, ['error' => 'Há possíveis duplicidades. Confira os registros encontrados antes de salvar.', 'code' => 'duplicate_review_required']), 409);
+            respond(array_merge($result, ['confirmation' => $confirmation]));
+        }
         if (in_array($matches[2], ['update', 'paid'], true)) {
             $body = json_decode((string)file_get_contents('php://input'), true) ?: [];
             if ($matches[2] === 'paid' && $existing['status'] !== 'scheduled') respond(['error' => 'Esta conta não está em aberto.'], 400);
@@ -265,19 +282,14 @@ try {
             respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
         }
 
-        if ($matches[2] === 'confirm' && $existing['status'] !== 'pending') respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, $session)));
         if ($matches[2] === 'restore' && $existing['status'] !== 'dismissed') respond(['error' => 'Este lançamento não foi removido.'], 400);
         $body = $matches[2] === 'restore' ? (json_decode((string)file_get_contents('php://input'), true) ?: []) : [];
-        $status = $matches[2] === 'restore' ? (in_array($body['status'] ?? '', ['pending', 'confirmed', 'paid', 'scheduled'], true) ? $body['status'] : 'pending') : ($matches[2] === 'confirm' ? 'confirmed' : 'dismissed');
+        $status = $matches[2] === 'restore' ? (in_array($body['status'] ?? '', ['pending', 'confirmed', 'paid', 'scheduled'], true) ? $body['status'] : 'pending') : 'dismissed';
         $updated = update_transaction_status($pdo, $userId, $controlId, $matches[1], $status);
         if (!$updated) {
             respond(['error' => 'Lancamento nao encontrado'], 404);
         }
-        if ($matches[2] === 'confirm' && $updated['dueDate']) {
-            $updated = update_transaction_status($pdo, $userId, $controlId, $matches[1], 'scheduled');
-        }
-
-        $verb = $matches[2] === 'confirm' ? 'confirmado' : ($matches[2] === 'remove' ? 'removido' : 'descartado');
+        $verb = $matches[2] === 'remove' ? 'removido' : 'descartado';
         add_message($pdo, $userId, $controlId, 'assistant', "Lancamento {$verb}: {$updated['description']}");
         respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
     }
@@ -321,6 +333,8 @@ try {
         }
 
         $mimeType = (string)($file['type'] ?: 'application/octet-stream');
+        $contentHash = hash_file('sha256', $target);
+        if ($contentHash === false) throw new CaptureRequestError('Não consegui verificar o arquivo enviado. Tente novamente.', 503);
         $storedName = upload_to_google_cloud_storage($env, $target, $objectName, $mimeType);
 
         add_document($pdo, $userId, $controlId, [
@@ -328,6 +342,7 @@ try {
             'storedName' => $storedName,
             'mimeType' => $mimeType,
             'status' => 'ocr_pending',
+            'contentHash' => $contentHash,
         ]);
 
         $message = "Recebi o arquivo \"{$originalName}\". ";
@@ -342,6 +357,7 @@ try {
             $transaction['status'] = 'pending';
             $saved = add_transaction($pdo, $userId, $controlId, $transaction);
             $captureIds[] = $saved['id'];
+            link_transaction_document($pdo, $controlId, (string)$saved['id'], (string)$documentId);
             $friendlyName = document_name_from_transaction($saved['description'], $originalName);
             update_document_name($pdo, $userId, $controlId, $documentId, $friendlyName);
             $originalName = $friendlyName;
@@ -568,7 +584,7 @@ function connect_db(array $env): PDO
 function ensure_schema(PDO $pdo): void
 {
     $pdo->exec('CREATE TABLE IF NOT EXISTS finup_schema_versions (version VARCHAR(80) NOT NULL PRIMARY KEY, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB');
-    $version = '20261118_capture_receipts_v1';
+    $version = '20261119_smart_review_v2';
     $check = $pdo->prepare('SELECT 1 FROM finup_schema_versions WHERE version = ?');
     $check->execute([$version]);
     if ($check->fetchColumn()) return;
@@ -722,10 +738,20 @@ function apply_schema_updates(PDO $pdo): void
     add_column_if_missing($pdo, 'transactions', 'recurrence_index', 'SMALLINT UNSIGNED NULL AFTER recurrence_group_id');
     add_column_if_missing($pdo, 'transactions', 'recurrence_total', 'SMALLINT UNSIGNED NULL AFTER recurrence_index');
     add_column_if_missing($pdo, 'documents', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
+    add_column_if_missing($pdo, 'documents', 'content_hash', 'CHAR(64) CHARACTER SET ascii NULL AFTER mime_type');
     add_column_if_missing($pdo, 'chat_messages', 'control_id', 'BIGINT UNSIGNED NULL AFTER id');
     migrate_default_control($pdo);
     ensure_category_unique_index($pdo);
     backfill_recurring_groups($pdo);
+    $pdo->exec('CREATE TABLE IF NOT EXISTS transaction_documents (
+        transaction_id BIGINT UNSIGNED NOT NULL,
+        document_id BIGINT UNSIGNED NOT NULL,
+        PRIMARY KEY (transaction_id, document_id),
+        INDEX idx_transaction_documents_document (document_id),
+        CONSTRAINT fk_transaction_documents_transaction FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE,
+        CONSTRAINT fk_transaction_documents_document FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB');
+    backfill_document_links($pdo);
 }
 
 function add_column_if_missing(PDO $pdo, string $table, string $column, string $definition): void
@@ -1270,9 +1296,15 @@ function read_data(PDO $pdo, int $userId, int $controlId): array
     $stmt->execute([$controlId]);
     $transactions = array_map('normalize_transaction', $stmt->fetchAll());
 
-    $stmt = $pdo->prepare('SELECT CAST(id AS CHAR) AS id, original_name AS originalName, stored_name AS storedName, mime_type AS mimeType, status, created_at AS createdAt FROM documents WHERE control_id = ? ORDER BY created_at DESC, id DESC');
+    $stmt = $pdo->prepare('SELECT CAST(id AS CHAR) AS id, original_name AS originalName, stored_name AS storedName, mime_type AS mimeType, content_hash AS contentHash, status, created_at AS createdAt FROM documents WHERE control_id = ? ORDER BY created_at DESC, id DESC');
     $stmt->execute([$controlId]);
     $documents = array_map('normalize_dates', $stmt->fetchAll());
+
+    $stmt = $pdo->prepare('SELECT CAST(td.transaction_id AS CHAR) AS transactionId, CAST(td.document_id AS CHAR) AS documentId FROM transaction_documents td INNER JOIN transactions t ON t.id = td.transaction_id INNER JOIN documents d ON d.id = td.document_id AND d.control_id = t.control_id WHERE t.control_id = ?');
+    $stmt->execute([$controlId]);
+    $documentIds = [];
+    foreach ($stmt->fetchAll() as $link) $documentIds[(string)$link['transactionId']][] = (string)$link['documentId'];
+    $transactions = array_map(fn($item) => array_merge($item, ['documentIds' => $documentIds[(string)$item['id']] ?? []]), $transactions);
 
     $stmt = $pdo->prepare("SELECT CAST(a.id AS CHAR) AS id, a.name, a.type,
         CAST(a.opening_balance AS DECIMAL(14,2)) AS openingBalance,
@@ -1508,20 +1540,14 @@ function move_transactions_to_control(PDO $pdo, int $userId, int $sourceControlI
             if ($stmt->rowCount() !== 1) throw new CaptureRequestError('Um lançamento mudou durante a transferência. Nada foi movido; atualize a tela e tente novamente.', 409);
         }
 
-        // Upload receipts retain the original scope so retries stay idempotent after moves.
-        $docConditions = implode(' OR ', array_fill(0, count($rows), "JSON_CONTAINS(capture_data, JSON_QUOTE(?), '$.transactionIds')"));
-        $stmt = $pdo->prepare("SELECT capture_data FROM capture_requests WHERE operation = 'upload' AND capture_data IS NOT NULL AND JSON_VALID(capture_data) AND ({$docConditions})");
+        $documentSlots = implode(',', array_fill(0, count($rows), '?'));
+        $stmt = $pdo->prepare("SELECT DISTINCT CAST(document_id AS CHAR) AS documentId FROM transaction_documents WHERE transaction_id IN ({$documentSlots})");
         $stmt->execute(array_map(fn($row) => (string)$row['id'], $rows));
         $documentIds = [];
-        foreach ($stmt->fetchAll() as $receipt) {
-            $capture = json_decode((string)$receipt['capture_data'], true);
-            $documentId = is_array($capture) ? (string)($capture['documentId'] ?? '') : '';
-            if (!preg_match('/^\d{1,20}$/', $documentId)) continue;
-            $relatedIds = array_values(array_unique(array_filter(array_map('strval', is_array($capture['transactionIds'] ?? null) ? $capture['transactionIds'] : []), fn($id) => preg_match('/^\d{1,20}$/', $id))));
-            if (!$relatedIds) continue;
-            $relatedSlots = implode(',', array_fill(0, count($relatedIds), '?'));
-            $stmt = $pdo->prepare("SELECT id FROM transactions WHERE id IN ({$relatedSlots}) AND status <> 'dismissed' AND control_id <> ? LIMIT 1");
-            $stmt->execute([...$relatedIds, $destinationControlId]);
+        foreach ($stmt->fetchAll() as $document) {
+            $documentId = (string)$document['documentId'];
+            $stmt = $pdo->prepare("SELECT t.id FROM transactions t INNER JOIN transaction_documents td ON td.transaction_id = t.id WHERE td.document_id = ? AND t.status <> 'dismissed' AND t.control_id <> ? LIMIT 1");
+            $stmt->execute([$documentId, $destinationControlId]);
             if (!$stmt->fetchColumn()) $documentIds[$documentId] = true;
         }
         $movedDocumentCount = 0;
@@ -1548,8 +1574,8 @@ function move_transactions_to_control(PDO $pdo, int $userId, int $sourceControlI
 
 function add_document(PDO $pdo, int $userId, int $controlId, array $document): void
 {
-    $stmt = $pdo->prepare('INSERT INTO documents (control_id, user_id, original_name, stored_name, mime_type, status) VALUES (?, ?, ?, ?, ?, ?)');
-    $stmt->execute([$controlId, $userId, $document['originalName'], $document['storedName'], $document['mimeType'], $document['status']]);
+    $stmt = $pdo->prepare('INSERT INTO documents (control_id, user_id, original_name, stored_name, mime_type, status, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    $stmt->execute([$controlId, $userId, $document['originalName'], $document['storedName'], $document['mimeType'], $document['status'], $document['contentHash'] ?? null]);
 }
 
 function serve_document(PDO $pdo, int $userId, int $controlId, string $id, array $env): void
@@ -1754,6 +1780,7 @@ function ensure_category(PDO $pdo, int $userId, int $controlId, string $name, st
 
 function build_state(array $data, array $sessionPayload): array
 {
+    $data = with_transaction_reviews($data);
     $month = date('Y-m');
     $confirmed = array_values(array_filter($data['transactions'], fn($item) => in_array($item['status'], ['confirmed', 'paid', 'scheduled'], true)));
     $pending = array_values(array_filter($data['transactions'], fn($item) => $item['status'] === 'pending'));
@@ -1769,7 +1796,7 @@ function build_state(array $data, array $sessionPayload): array
         'messages' => $data['messages'],
         'transactions' => $confirmed,
         'pendingTransactions' => $pending,
-        'documents' => $data['documents'],
+        'documents' => array_map('review_public_document', $data['documents']),
         'wallets' => $data['wallets'] ?? [],
         'session' => $sessionPayload,
         'summary' => [

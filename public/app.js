@@ -53,7 +53,7 @@ async function request(url, body, multipart = false, attempt = null) {
   }
   if (!response.ok) throw Object.assign(new Error(data.error === "Erro interno"
     ? "Não foi possível concluir agora. Seus dados já salvos continuam disponíveis."
-    : data.error || "Não foi possível concluir. Tente novamente."), { retryable: response.status >= 500 || [401, 403, 408, 409, 429].includes(response.status) });
+    : data.error || "Não foi possível concluir. Tente novamente."), { retryable: response.status >= 500 || [401, 403, 408, 409, 429].includes(response.status), code: data.code, response: data });
   return data;
 }
 
@@ -71,6 +71,7 @@ async function task(action, target) {
     $("bulk-edit").disabled = !state.selected.size;
     $("move-selected").disabled = !state.selected.size;
     if ($("move-dialog").open) previewMove();
+    if ($("capture-dialog").open && !$("capture-result").hidden) syncCaptureSave();
   }
 }
 
@@ -245,6 +246,11 @@ function wallets(selected, first = "Sem carteira") {
   return '<option value="">' + first + "</option>" + (state.data?.wallets || []).map((wallet) =>
     '<option value="' + escape(wallet.id) + '"' + (String(selected || "") === String(wallet.id) ? " selected" : "") + ">" + escape(wallet.name) + "</option>").join("");
 }
+function syncPaymentLabels(form) {
+  const income = form.elements.kind.value === "income";
+  form.elements.paymentState.options[0].textContent = income ? "Recebida" : "Paga";
+  form.elements.paymentState.options[1].textContent = income ? "A receber" : "A pagar";
+}
 function renderSession() {
   $("user-name").textContent = state.session?.user?.name || "";
   $("control-select").innerHTML = (state.session?.controls || []).map((control) => '<option value="' + escape(control.id) + '">' + escape(control.name) + "</option>").join("");
@@ -276,13 +282,15 @@ function render(data) {
   const pending = data.pendingTransactions || [];
   $("review-notice").hidden = !pending.length;
   $("review-count").textContent = pending.length + (pending.length === 1 ? " item para revisar" : " itens para revisar");
+  const attentionCount = pending.filter((item) => item.review?.needsAttention).length;
+  $("review-notice").querySelector("small").textContent = attentionCount ? attentionCount + (attentionCount === 1 ? " lançamento com aviso" : " lançamentos com avisos") : "Conferir antes de salvar";
   $("chat-pending-count").hidden = !pending.length;
   $("chat-pending-count").textContent = pending.length;
   const bills = data.transactions.filter((item) => item.status === "scheduled").sort((a, b) => (a.dueDate || a.transactionDate).localeCompare(b.dueDate || b.transactionDate));
   $("home-bills").innerHTML = bills.slice(0, 3).map((item) => transactionRow(item, true)).join("") || '<p class="empty">' + icon("circle-check") + "Nenhuma conta em aberto.</p>";
   const recentGroups = groupDrafts(data.transactions.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))));
   $("recent-transactions").innerHTML = recentGroups.slice(0, 4).map((group) => transactionRow({ ...group[0], seriesCount: group.length })).join("") || '<div class="empty">' + icon("receipt-text") + '<p>Seu primeiro lançamento começa aqui.</p><button type="button" class="text-button" data-register>Registrar agora</button></div>';
-  $("pending-transactions").innerHTML = groupDrafts(pending).map((group) => '<button class="item-row" type="button" data-drafts="' + escape(group.map((item) => item.id).join(",")) + '">' + '<span class="row-symbol review">' + icon("clipboard-check") + '</span><span class="item-main"><strong>' + escape(group[0].description) + '</strong><small>' + (group.length > 1 ? group.length + " meses · " : "") + escape(group[0].category) + ' · Ainda não salvo</small></span><span class="item-end"><strong>' + money(group[0].amount) + (group.length > 1 ? "/mês" : "") + "</strong>" + icon("chevron-right") + "</span></button>").join("") || '<p class="empty">' + icon("circle-check") + "Tudo revisado.</p>";
+  $("pending-transactions").innerHTML = groupDrafts(pending).map((group) => '<button class="item-row" type="button" data-drafts="' + escape(group.map((item) => item.id).join(",")) + '">' + '<span class="row-symbol review">' + icon("clipboard-check") + '</span><span class="item-main"><strong>' + escape(group[0].description) + '</strong><small>' + (group.length > 1 ? group.length + " meses · " : "") + escape(group[0].category) + ' · Ainda não salvo</small>' + (group.some((item) => item.review?.needsAttention) ? '<small class="review-label">' + icon("triangle-alert") + (group.some((item) => item.review?.duplicateCount) ? "Possível duplicidade" : "Dados para conferir") + '</small>' : "") + '</span><span class="item-end"><strong>' + money(group[0].amount) + (group.length > 1 ? "/mês" : "") + "</strong>" + icon("chevron-right") + "</span></button>").join("") || '<p class="empty">' + icon("circle-check") + "Tudo revisado.</p>";
   renderLedger();
   renderBills();
   renderMessages();
@@ -363,6 +371,8 @@ function renderWallets() {
 }
 
 document.addEventListener("click", (event) => {
+  const comparison = event.target.closest("[data-review-transaction]");
+  if (comparison && !state.busy) openDetail(comparison.dataset.reviewTransaction);
   const resume = event.target.closest("[data-resume-attempt]");
   const removeAttempt = event.target.closest("[data-remove-attempt]");
   if (resume && !state.busy) {
@@ -451,6 +461,7 @@ async function openCapture() {
   $("capture-progress").hidden = true;
   $("manual-form").elements.transactionDate.value ||= localDate();
   $("manual-form").elements.accountId.innerHTML = wallets($("manual-form").elements.accountId.value);
+  syncPaymentLabels($("manual-form"));
   openSheet("capture-dialog");
   return true;
 }
@@ -463,6 +474,7 @@ $("manual-toggle").onclick = () => {
   persistDraft();
 };
 $("manual-form").elements.paymentState.onchange = () => { $("manual-date-label").textContent = $("manual-form").elements.paymentState.value === "scheduled" ? "Vencimento" : "Data"; };
+$("manual-form").elements.kind.onchange = () => syncPaymentLabels($("manual-form"));
 function captureProgress(text) {
   $("capture-entry").hidden = true; $("capture-result").hidden = true;
   $("capture-progress").hidden = false; $("capture-progress-text").textContent = text;
@@ -520,6 +532,68 @@ all("[data-capture]").forEach((button) => { button.onclick = () => {
   await captureRequest("/api/upload", body, "Enviando e lendo o comprovante…", true);
   $(id).value = "";
 }; });
+function captureReview(items) {
+  const issues = new Map();
+  const documents = new Map();
+  const duplicates = new Map();
+  const duplicateIds = new Set();
+  const fields = new Set();
+  for (const item of items) {
+    for (const issue of item.review?.issues || []) {
+      issues.set(issue.code, issue);
+      for (const field of issue.fields || []) fields.add(field);
+    }
+    for (const document of item.review?.documents || []) documents.set(String(document.id), document);
+    for (const duplicate of item.review?.duplicates || []) duplicates.set(String(duplicate.id), duplicate);
+    for (const id of item.review?.duplicateIds || []) duplicateIds.add(String(id));
+  }
+  return { issues: [...issues.values()], documents: [...documents.values()], duplicates, duplicateIds: [...duplicateIds], fields };
+}
+function reviewField(field, text, fields) {
+  return fields.has(field) ? '<span class="review-field" title="Dado para conferir">' + escape(text) + icon("circle-alert") + '</span>' : escape(text);
+}
+function reviewDocuments(items) {
+  const documents = captureReview(items).documents;
+  if (!documents.length) return "";
+  return '<div class="review-documents">' + documents.map((document) => {
+    const url = "/api/documents/" + encodeURIComponent(document.id) + "/view";
+    return '<a class="review-document" href="' + url + '" target="_blank" rel="noopener">' +
+      (String(document.mimeType || "").startsWith("image/") ? '<img class="receipt-thumbnail" src="' + url + '?raw=1" alt="Prévia do comprovante" loading="lazy" />' : '<span class="review-file-icon">' + icon("file-text") + '</span>') +
+      '<span><strong>Ver comprovante</strong><small>' + escape(document.originalName) + '</small></span>' + icon("external-link") + '</a>';
+  }).join("") + '</div>';
+}
+document.addEventListener("error", (event) => {
+  if (!event.target.classList?.contains("receipt-thumbnail")) return;
+  const fallback = document.createElement("span");
+  fallback.className = "review-file-icon";
+  fallback.setAttribute("aria-hidden", "true");
+  fallback.innerHTML = icon("file-text");
+  event.target.replaceWith(fallback);
+  icons();
+}, true);
+function reviewNotices(items, interactive = true) {
+  const review = captureReview(items);
+  if (!review.issues.length && !review.duplicateIds.length) return "";
+  let content = review.issues.map((issue) => '<p class="review-issue">' + icon("circle-alert") + '<span>' + escape(issue.message) + '</span></p>').join("");
+  if (review.duplicateIds.length) {
+    const count = review.duplicateIds.length;
+    content += '<details class="duplicate-notice"' + (count <= 3 ? ' open' : '') + '><summary>' + icon("copy") + '<span>Possível duplicidade<small>' + count + (count === 1 ? ' registro encontrado' : ' registros encontrados') + '</small></span>' + icon("chevron-down") + '</summary><div class="duplicate-candidates">' + review.duplicateIds.map((id) => {
+      const candidate = findTransaction(id) || review.duplicates.get(id);
+      if (!candidate) return "";
+      const reason = review.duplicates.get(id)?.reason === "same_document" ? "Mesmo arquivo" : "Dados financeiros semelhantes";
+      const tag = interactive ? 'button type="button" data-review-transaction="' + escape(id) + '"' : 'div';
+      const close = interactive ? 'button' : 'div';
+      return '<' + tag + ' class="duplicate-row"><span><strong>' + escape(candidate.description) + '</strong><small>' + date(candidate.dueDate || candidate.transactionDate) + ' · ' + (candidate.status === "pending" ? "Rascunho" : candidate.status === "scheduled" ? "Em aberto" : "Já salvo") + '</small><small>' + reason + '</small></span><strong>' + money(candidate.amount) + '</strong></' + close + '>';
+    }).join("") + '</div></details>';
+  }
+  return '<section class="review-notices" aria-label="Avisos da conferência">' + content + '</section>';
+}
+function syncCaptureSave() {
+  const drafts = captureDrafts(state.data || {}, state.captureIds);
+  const hasDuplicates = captureReview(drafts).duplicateIds.length > 0;
+  $("capture-duplicate-check").hidden = !hasDuplicates;
+  $("capture-save").disabled = state.busy || !drafts.length || (hasDuplicates && !$("capture-duplicate-ack").checked);
+}
 function showCapture(ids) {
   state.captureIds = ids.map(String);
   const drafts = captureDrafts(state.data, state.captureIds);
@@ -532,6 +606,7 @@ function showCapture(ids) {
   $("capture-edit").hidden = groups.length > 1;
   $("capture-preview").innerHTML = groups.map((group) => {
     const item = group[0];
+    const review = captureReview(group);
     const unpaid = group.filter((entry) => entry.dueDate).length;
     const paymentLabel = group.length > 1 && unpaid > 0 && unpaid < group.length
       ? "Primeiro realizado · Próximos em aberto"
@@ -541,12 +616,12 @@ function showCapture(ids) {
     const walletName = sameWallet ? item.accountName || state.data.wallets?.find((wallet) => String(wallet.id) === String(item.accountId))?.name || "Sem carteira" : "Carteiras diferentes";
     const amount = sameAmount ? item.amount : group.reduce((sum, entry) => sum + Number(entry.amount), 0);
     return '<article class="capture-card"><span class="eyebrow">' +
-      (item.kind === "income" ? "Receita" : "Despesa") + " · " + paymentLabel +
-      '</span><h2>' + escape(item.description) + '</h2><strong class="capture-value">' +
+      (item.kind === "income" ? "Receita" : "Despesa") + " · " + reviewField("paymentState", paymentLabel, review.fields) +
+      '</span><h2>' + escape(item.description) + '</h2>' + reviewNotices(group) + reviewDocuments(group) + '<strong class="capture-value' + (review.fields.has("amount") ? ' review-value' : '') + '">' +
       money(amount) + (group.length > 1 ? '<small>' + (sameAmount ? " por mês" : " no total · valores variáveis") + "</small>" : "") +
       '</strong><dl><div><dt>' + (item.dueDate ? "Vencimento" : "Data") + '</dt><dd>' +
-      date(item.dueDate || item.transactionDate) + '</dd></div><div><dt>Categoria</dt><dd>' +
-      escape(item.category) + '</dd></div><div><dt>Carteira</dt><dd>' + escape(walletName) +
+      reviewField("date", date(item.dueDate || item.transactionDate), review.fields) + '</dd></div><div><dt>Categoria</dt><dd>' +
+      reviewField("category", item.category, review.fields) + '</dd></div><div><dt>Carteira</dt><dd>' + escape(walletName) +
       '</dd></div>' + (group.length > 1 ? '<div><dt>Repetição</dt><dd>' + group.length +
       " meses, até " + date(group.at(-1).dueDate || group.at(-1).transactionDate) + '</dd></div>' : "") +
       '</dl>' + (groups.length > 1 ? '<button type="button" class="text-button" data-transaction="' +
@@ -554,12 +629,22 @@ function showCapture(ids) {
   }).join("");
   $("capture-result-note").textContent = drafts.length > 1 ? "Serão salvos " + drafts.length + " lançamentos desta captura. Total: " + money(drafts.reduce((sum, item) => sum + Number(item.amount), 0)) + "." : "O lançamento só entra nos seus totais ao salvar.";
   $("capture-save").innerHTML = icon("check") + (drafts.length > 1 ? "Salvar " + drafts.length + " lançamentos" : "Salvar lançamento");
+  $("capture-duplicate-ack").checked = false;
+  syncCaptureSave();
   $("capture-edit").onclick = () => drafts.length > 1 && drafts[0].recurrenceGroupId ? openBulk(drafts[0]) : openDetail(drafts[0].id);
   openSheet("capture-dialog");
 }
 $("capture-save").onclick = () => task(async () => {
   const drafts = captureDrafts(state.data, state.captureIds);
-  for (const item of drafts) render(await request("/api/transactions/" + encodeURIComponent(item.id) + "/confirm", {}));
+  if (!drafts.length) throw new Error("Esta captura já foi salva ou descartada. Atualize a tela para conferir.");
+  const duplicateIds = captureReview(drafts).duplicateIds;
+  if (duplicateIds.length && !$("capture-duplicate-ack").checked) throw new Error("Confira os possíveis duplicados e marque a confirmação antes de salvar.");
+  try {
+    render(await request("/api/transactions/confirm", { ids: drafts.map((item) => item.id), reviewedDuplicateIds: $("capture-duplicate-ack").checked ? duplicateIds : [] }));
+  } catch (error) {
+    if (error.code === "duplicate_review_required" && error.response?.summary) { render(error.response); showCapture(state.captureIds); }
+    throw error;
+  }
   state.captureIds = [];
   $("capture-dialog").close();
   $("manual-form").reset(); $("manual-form").hidden = true; $("capture-text-form").hidden = false;
@@ -568,6 +653,7 @@ $("capture-save").onclick = () => task(async () => {
     toast("Registro desfeito.");
   });
 }, "capture-error");
+$("capture-duplicate-ack").onchange = syncCaptureSave;
 $("capture-discard").onclick = () => task(async () => {
   const drafts = captureDrafts(state.data, state.captureIds);
   for (const item of drafts) render(await request("/api/transactions/" + encodeURIComponent(item.id) + "/dismiss", {}));
@@ -588,10 +674,21 @@ function openDetail(id) {
     (item.status === "scheduled" ? '<form id="payment-form" class="settings-form payment-form"><label><span>Data do ' + (item.kind === "income" ? "recebimento" : "pagamento") + '</span><input name="transactionDate" type="date" required value="' + localDate() + '" /></label><button class="primary" type="submit">' + icon("circle-check") + (item.kind === "income" ? "Registrar recebimento" : "Registrar pagamento") + "</button></form>" : "") +
     '<button type="button" class="text-button danger" id="remove-transaction">' + icon("trash-2") + (item.status === "pending" ? "Descartar rascunho" : "Remover lançamento") + "</button>";
   const form = $("detail-form");
+  syncPaymentLabels(form);
+  form.elements.kind.onchange = () => syncPaymentLabels(form);
+  if (item.status === "pending") {
+    form.insertAdjacentHTML("beforebegin", reviewNotices([item], false) + reviewDocuments([item]));
+    const fields = captureReview([item]).fields;
+    const inputs = { amount: ["amount"], date: ["transactionDate", "dueDate"], paymentState: ["paymentState"], category: ["category"] };
+    for (const [field, names] of Object.entries(inputs)) {
+      if (!fields.has(field)) continue;
+      for (const name of names) form.elements[name].closest("label").classList.add("review-input");
+    }
+  }
   if (item.status !== "pending") {
     $("detail-title").textContent = "Detalhes";
     form.hidden = true;
-    form.insertAdjacentHTML("beforebegin", '<section id="detail-summary"><p class="eyebrow">' + escape(item.category) + '</p><h2>' + escape(item.description) + '</h2><strong class="capture-value ' + item.kind + '">' + money(item.amount) + '</strong><p class="list-caption">' + date(item.dueDate || item.transactionDate) + " · " + escape(item.accountName || "Sem carteira") + '</p><button id="detail-edit-button" class="text-button" type="button">' + icon("pencil") + 'Editar dados</button>' + (canMoveBetweenControls() ? '<button id="detail-move-button" class="text-button" type="button">' + icon("folder-symlink") + 'Mover para outro espaço</button>' : "") + '</section>');
+    form.insertAdjacentHTML("beforebegin", '<section id="detail-summary"><p class="eyebrow">' + escape(item.category) + '</p><h2>' + escape(item.description) + '</h2><strong class="capture-value ' + item.kind + '">' + money(item.amount) + '</strong><p class="list-caption">' + date(item.dueDate || item.transactionDate) + " · " + escape(item.accountName || "Sem carteira") + '</p>' + reviewDocuments([item]) + '<button id="detail-edit-button" class="text-button" type="button">' + icon("pencil") + 'Editar dados</button>' + (canMoveBetweenControls() ? '<button id="detail-move-button" class="text-button" type="button">' + icon("folder-symlink") + 'Mover para outro espaço</button>' : "") + '</section>');
     $("detail-edit-button").onclick = () => {
       form.hidden = false; $("detail-summary").hidden = true;
       $("detail-title").textContent = "Editar lançamento";

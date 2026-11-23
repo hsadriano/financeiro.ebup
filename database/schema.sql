@@ -117,12 +117,22 @@ CREATE TABLE documents (
   original_name VARCHAR(255) NOT NULL,
   stored_name VARCHAR(255) NOT NULL,
   mime_type VARCHAR(120) NOT NULL,
+  content_hash CHAR(64) CHARACTER SET ascii NULL,
   status ENUM('uploaded', 'ocr_pending', 'review_pending', 'processed', 'failed') NOT NULL DEFAULT 'uploaded',
   extracted_text MEDIUMTEXT NULL,
   summary_json JSON NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_documents_user FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
+CREATE TABLE transaction_documents (
+  transaction_id BIGINT UNSIGNED NOT NULL,
+  document_id BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (transaction_id, document_id),
+  INDEX idx_transaction_documents_document (document_id),
+  CONSTRAINT fk_transaction_documents_transaction FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE,
+  CONSTRAINT fk_transaction_documents_document FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
 
 CREATE TABLE chat_messages (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,

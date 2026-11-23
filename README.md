@@ -42,6 +42,8 @@ Em hospedagem PHP/Apache, como Hostinger compartilhada, o projeto tambem roda di
 - Carteiras vinculáveis aos lançamentos, com tipo, saldo inicial e saldo calculado.
 - Navegação mobile com Início, Extrato, Registrar, Contas e Assistente.
 - Conferência isolada por captura, sem misturar rascunhos anteriores.
+- Comprovantes vinculados aos lançamentos, avisos de leitura e conferência de possíveis duplicidades.
+- Confirmação da captura inteira em uma transação de banco, sem salvar apenas parte de uma série.
 - Registro manual sem IA, com repetição mensal e ajuste ao último dia do mês.
 - Edição de lançamentos salvos, registro de pagamento/recebimento e remoção com desfazer.
 - Alteração de valor/carteira em seleção ou série: só este, este e os próximos, ou todos.
@@ -68,6 +70,32 @@ somente a primeira ocorrência é realizada; as próximas ficam em aberto.
 Os ícones Lucide 0.468.0 são distribuídos localmente em `public/lucide.min.js`,
 preservando a licença do pacote e sem depender de CDN no celular.
 
+## Conferência inteligente
+
+Na conferência e nos detalhes, **Ver comprovante** abre o arquivo vinculado. Imagens
+também mostram uma miniatura; se ela falhar, o link continua disponível. Quando um
+upload gera um lançamento, o vínculo passa a ser permanente. A migração recupera vínculos
+antigos a partir dos recibos de captura quando arquivo e lançamento ainda estão
+no mesmo espaço. Arquivos antigos sem uma associação segura não são vinculados por
+suposição de nome ou valor.
+
+Antes de salvar, leituras com confiança informada pelo extrator abaixo de 0,85
+destacam valor, data e situação para conferência. Categoria Outros sugerida pela IA
+também recebe aviso. Esse indicador não é uma probabilidade calibrada nem substitui
+a conferência do usuário; registros manuais não recebem esses avisos de extração.
+
+Possíveis duplicados são procurados apenas no espaço atual. A comparação usa o
+mesmo conteúdo de arquivo ou valor e data com descrição/estabelecimento compatíveis.
+Receitas e despesas distintas não são confundidas pelo valor, ocorrências da mesma
+série são ignoradas e lançamentos descartados ficam fora da comparação. Trata-se de
+um alerta, não de uma garantia de detectar toda repetição ou de uma exclusão automática.
+
+Ao encontrar candidatos, a captura apresenta os registros e pede confirmação
+explícita para salvar mesmo assim. O servidor verifica novamente os candidatos;
+se houver um novo registro que não estava na conferência, nada da captura é salvo
+até a revisão. A confirmação em lote preserva datas e contas futuras e pode ser
+repetida sem salvar os mesmos rascunhos outra vez.
+
 ## Mover lançamentos entre espaços
 
 Nos detalhes de um lançamento, use **Mover para outro espaço**. No Extrato,
@@ -81,7 +109,7 @@ de edição nos dois espaços. Categorias são associadas pelo nome e tipo, e cr
 no destino quando necessário. Por padrão, carteiras são associadas por nome único;
 se não houver correspondência, o item fica sem carteira, com aviso na prévia.
 
-Comprovantes com vínculo de captura acompanham os registros quando todos os itens
+Comprovantes vinculados acompanham os registros quando todos os itens
 ativos daquele documento estiverem no destino. Arquivos antigos sem esse vínculo
 permanecem no espaço original. O objeto no armazenamento não é renomeado nem
 duplicado. A operação não cria novos lançamentos e não troca o espaço aberto.
@@ -226,7 +254,25 @@ Gastei 42,50 com Uber ontem no cartão
 ## Validação e próximos passos
 
 Execute `pnpm test` e `php -l api.php` antes de publicar. Os testes cobrem
-interpretação, captura isolada, recorrência, filtros, edição e contrato PHP de entrada.
+interpretação, captura isolada, recorrência, filtros, edição, duplicidades e os
+contratos de conferência das implementações Node e PHP.
+
+`FINUP_TEST_MARIADB=1 pnpm test` também valida o banco e os endpoints reais dos dois
+backends. Esses testes exigem MariaDB local, usam tabelas temporárias e um banco
+descartável com nome exclusivo, removido ao terminar. Não alteram os registros do
+banco do app nem chamam os serviços de IA.
+
+## Fila de evolução
+
+A conferência inteligente é a primeira etapa concluída da próxima rodada. A ordem
+planejada para as seguintes é:
+
+1. Encerrar recorrências, cancelar parcelas futuras e facilitar ajustes de vencimento.
+2. Alertas de contas próximas e atrasadas, pagamento e recebimento rápidos.
+3. Fluxo de caixa futuro, previsão de saldo por carteira e orçamento por categoria.
+4. Primeiro uso guiado para espaços, carteiras e saldos; login Google continua adiado.
+5. Abertura e registro sem conexão, com sincronização posterior.
+6. Preparação para lançamento: privacidade, consentimento para IA, exportação/exclusão de dados, permissões, credenciais, backups, testes físicos e pacote nativo.
 
 Antes das lojas: testar câmera, microfone, teclado e safe areas em aparelhos físicos,
 adicionar consentimento de processamento por IA, exclusão de conta/dados e o pacote

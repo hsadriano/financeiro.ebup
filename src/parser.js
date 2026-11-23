@@ -345,6 +345,7 @@ function normalizeAiResult(result, rawText, now) {
 function normalizeAiTransaction(transaction, rawText, now) {
   const amount = Number(transaction.amount);
   if (!Number.isFinite(amount) || amount <= 0) return null;
+  const confidence = Number(transaction.confidence ?? 0.8);
 
   const kind = transaction.kind === "income" ? "income" : "expense";
   const transactionDate = isIsoDate(transaction.transactionDate)
@@ -367,7 +368,7 @@ function normalizeAiTransaction(transaction, rawText, now) {
     category,
     source: "chat",
     rawText,
-    confidence: Math.max(0, Math.min(1, Number(transaction.confidence || 0.8)))
+    confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0
   };
 }
 

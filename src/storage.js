@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { confirmationIds, unreviewedDuplicateIds } from "./transaction-review.js";
 
 const initialData = {
   transactions: [],
@@ -108,6 +109,27 @@ export class JsonStorage {
     document.status = status;
     await this.write(data);
     return document;
+  }
+
+  async linkTransactionDocument(transactionId, documentId) {
+    const data = await this.read();
+    const transaction = data.transactions.find((item) => String(item.id) === String(transactionId));
+    if (!transaction || !data.documents.some((item) => String(item.id) === String(documentId))) return;
+    transaction.documentIds = [...new Set([...(transaction.documentIds || []), String(documentId)])];
+    await this.write(data);
+  }
+
+  async confirmTransactions(inputIds, reviewedIds = []) {
+    const ids = confirmationIds(inputIds);
+    const data = await this.read();
+    const selected = new Set(ids);
+    const rows = data.transactions.filter((item) => selected.has(String(item.id)) && item.status !== "dismissed");
+    if (rows.length !== ids.length) throw Object.assign(new Error("Um ou mais lançamentos não foram encontrados neste espaço."), { status: 404 });
+    const pending = rows.filter((item) => item.status === "pending");
+    if (unreviewedDuplicateIds(data, pending.map((item) => item.id), Array.isArray(reviewedIds) ? reviewedIds : []).length) return { confirmedCount: 0, reviewRequired: true };
+    for (const item of pending) item.status = item.dueDate ? "scheduled" : "confirmed";
+    if (pending.length) await this.write(data);
+    return { confirmedCount: pending.length, reviewRequired: false };
   }
 
   async updateDocumentName(id, originalName) {

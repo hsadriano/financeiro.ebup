@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { executeCapture } from "./capture-requests.js";
 import { expandMoveRows, matchMoveWallet, normalizeMoveName } from "./transaction-move.js";
+import { confirmationIds, unreviewedDuplicateIds } from "./transaction-review.js";
 
 const defaultUser = {
   name: "Usuario principal",
@@ -115,6 +116,7 @@ export class MariaDbStorage {
          original_name AS originalName,
          stored_name AS storedName,
          mime_type AS mimeType,
+         content_hash AS contentHash,
          status,
          created_at AS createdAt
        FROM documents
@@ -122,6 +124,20 @@ export class MariaDbStorage {
        ORDER BY created_at DESC, id DESC`,
       [this.controlId]
     );
+
+    const [documentLinks] = await this.pool.execute(
+      `SELECT CAST(td.transaction_id AS CHAR) AS transactionId, CAST(td.document_id AS CHAR) AS documentId
+       FROM transaction_documents td
+       INNER JOIN transactions t ON t.id = td.transaction_id
+       INNER JOIN documents d ON d.id = td.document_id AND d.control_id = t.control_id
+       WHERE t.control_id = ?`,
+      [this.controlId]
+    );
+    const documentIds = new Map();
+    for (const link of documentLinks) {
+      if (!documentIds.has(link.transactionId)) documentIds.set(link.transactionId, []);
+      documentIds.get(link.transactionId).push(link.documentId);
+    }
 
     const [wallets] = await this.pool.execute(
       `SELECT CAST(a.id AS CHAR) AS id, a.name, a.type, a.opening_balance AS openingBalance,
@@ -139,7 +155,7 @@ export class MariaDbStorage {
 
     return {
       messages: messages.map(normalizeDates),
-      transactions: transactions.map(normalizeTransaction),
+      transactions: transactions.map((row) => ({ ...normalizeTransaction(row), documentIds: documentIds.get(String(row.id)) || [] })),
       documents: documents.map(normalizeDates),
       wallets
     };
@@ -323,6 +339,41 @@ export class MariaDbStorage {
     return count;
   }
 
+  async confirmTransactions(inputIds, reviewedIds = []) {
+    const ids = confirmationIds(inputIds);
+    const userId = this.userId;
+    const controlId = this.controlId;
+    const reviewed = Array.isArray(reviewedIds) ? reviewedIds.filter((id) => ["string", "number"].includes(typeof id)).map(String) : [];
+    const requestPool = this.requestContext.getStore()?.pool;
+    const nested = Boolean(requestPool && requestPool !== this.defaultPool);
+    const connection = nested ? requestPool : await this.defaultPool.getConnection();
+    try {
+      if (!nested) await connection.beginTransaction();
+      return await this.requestContext.run({ pool: connection, userId, controlId }, async () => {
+        await connection.execute("SELECT id FROM financial_controls WHERE id = ? FOR UPDATE", [controlId]);
+        const [members] = await connection.execute("SELECT role FROM control_members WHERE user_id = ? AND control_id = ?", [userId, controlId]);
+        if (!members.length || !["owner", "editor"].includes(members[0].role)) throw Object.assign(new Error("Você precisa ter permissão de edição para salvar lançamentos."), { status: 403 });
+        const slots = ids.map(() => "?").join(", ");
+        const [rows] = await connection.execute(`SELECT CAST(id AS CHAR) AS id, status FROM transactions WHERE control_id = ? AND id IN (${slots}) AND status <> 'dismissed' FOR UPDATE`, [controlId, ...ids]);
+        if (rows.length !== ids.length) throw Object.assign(new Error("Um ou mais lançamentos não foram encontrados neste espaço."), { status: 404 });
+        const pendingIds = rows.filter((row) => row.status === "pending").map((row) => String(row.id));
+        if (pendingIds.length && unreviewedDuplicateIds(await this.read(), pendingIds, reviewed).length) {
+          if (!nested) await connection.rollback();
+          return { confirmedCount: 0, reviewRequired: true };
+        }
+        if (pendingIds.length) {
+          await connection.execute(`UPDATE transactions SET status = CASE WHEN due_date IS NOT NULL THEN 'scheduled' ELSE 'confirmed' END WHERE control_id = ? AND status = 'pending' AND id IN (${slots})`, [controlId, ...ids]);
+          await this.addMessage({ role: "assistant", content: pendingIds.length === 1 ? "Lançamento salvo após conferência." : `${pendingIds.length} lançamentos salvos após conferência.` });
+        }
+        if (!nested) await connection.commit();
+        return { confirmedCount: pendingIds.length, reviewRequired: false };
+      });
+    } catch (error) {
+      if (!nested) await connection.rollback();
+      throw error;
+    } finally { if (!nested) connection.release(); }
+  }
+
   async walletsForControl(controlId, userId = this.userId) {
     const [members] = await this.pool.execute(
       "SELECT role FROM control_members WHERE user_id = ? AND control_id = ? LIMIT 1",
@@ -452,26 +503,17 @@ export class MariaDbStorage {
         if (Number(updated.affectedRows) !== 1) throw Object.assign(new Error("Um lançamento mudou durante a transferência. Nada foi movido; atualize a tela e tente novamente."), { status: 409 });
       }
 
-      // Upload receipts keep their original scope for idempotency, even after a second move.
-      const documentConditions = rows.map(() => "JSON_CONTAINS(capture_data, JSON_QUOTE(?), '$.transactionIds')").join(" OR ");
-      const [receipts] = await connection.execute(
-        `SELECT capture_data FROM capture_requests
-         WHERE operation = 'upload' AND capture_data IS NOT NULL AND JSON_VALID(capture_data)
-           AND (${documentConditions})`,
+      const [linkedDocuments] = await connection.execute(
+        `SELECT DISTINCT CAST(document_id AS CHAR) AS documentId FROM transaction_documents WHERE transaction_id IN (${rows.map(() => "?").join(", ")})`,
         rows.map((row) => String(row.id))
       );
       const documentIds = new Set();
-      for (const receipt of receipts) {
-        let capture;
-        try { capture = JSON.parse(receipt.capture_data); } catch { continue; }
-        if (!capture?.documentId || !/^\d{1,20}$/.test(String(capture.documentId))) continue;
-        const relatedIds = Array.isArray(capture.transactionIds) ? [...new Set(capture.transactionIds.map(String))].filter((id) => /^\d{1,20}$/.test(id)) : [];
-        if (!relatedIds.length) continue;
+      for (const document of linkedDocuments) {
         const [remaining] = await connection.execute(
-          `SELECT id FROM transactions WHERE id IN (${relatedIds.map(() => "?").join(", ")}) AND status <> 'dismissed' AND control_id <> ? LIMIT 1`,
-          [...relatedIds, destinationControlId]
+          `SELECT t.id FROM transactions t INNER JOIN transaction_documents td ON td.transaction_id = t.id WHERE td.document_id = ? AND t.status <> 'dismissed' AND t.control_id <> ? LIMIT 1`,
+          [document.documentId, destinationControlId]
         );
-        if (!remaining.length) documentIds.add(String(capture.documentId));
+        if (!remaining.length) documentIds.add(document.documentId);
       }
       let movedDocumentCount = 0;
       if (documentIds.size) {
@@ -500,12 +542,35 @@ export class MariaDbStorage {
 
   async addDocument(document) {
     const [result] = await this.pool.execute(
-      `INSERT INTO documents (control_id, user_id, original_name, stored_name, mime_type, status)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [this.controlId, this.userId, document.originalName, document.storedName, document.mimeType, document.status]
+      `INSERT INTO documents (control_id, user_id, original_name, stored_name, mime_type, status, content_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [this.controlId, this.userId, document.originalName, document.storedName, document.mimeType, document.status, document.contentHash || null]
     );
 
     return { id: String(result.insertId), createdAt: new Date().toISOString(), ...document };
+  }
+
+  async linkTransactionDocument(transactionId, documentId) {
+    await this.pool.execute(
+      `INSERT IGNORE INTO transaction_documents (transaction_id, document_id)
+       SELECT t.id, d.id FROM transactions t INNER JOIN documents d ON d.id = ? AND d.control_id = t.control_id WHERE t.id = ? AND t.control_id = ?`,
+      [documentId, transactionId, this.controlId]
+    );
+  }
+
+  async backfillDocumentLinks() {
+    const [receipts] = await this.pool.execute("SELECT capture_data FROM capture_requests WHERE operation = 'upload' AND capture_data IS NOT NULL AND JSON_VALID(capture_data)");
+    for (const receipt of receipts) {
+      let capture;
+      try { capture = JSON.parse(receipt.capture_data); } catch { continue; }
+      const documentId = String(capture?.documentId || "");
+      const ids = Array.isArray(capture?.transactionIds) ? [...new Set(capture.transactionIds.map(String))].filter((id) => /^\d{1,20}$/.test(id)) : [];
+      if (!/^\d{1,20}$/.test(documentId) || !ids.length) continue;
+      await this.pool.execute(
+        `INSERT IGNORE INTO transaction_documents (transaction_id, document_id) SELECT t.id, d.id FROM transactions t INNER JOIN documents d ON d.id = ? AND d.control_id = t.control_id WHERE t.id IN (${ids.map(() => "?").join(", ")})`,
+        [documentId, ...ids]
+      );
+    }
   }
 
   async updateDocumentStatus(id, status) {
@@ -691,6 +756,36 @@ export class MariaDbStorage {
     await this.migrateDefaultControl();
     await this.ensureCategoryUniqueIndex();
     await this.backfillRecurringGroups();
+    await this.ensureReviewSchema();
+  }
+
+  async ensureReviewSchema() {
+    await this.pool.execute("CREATE TABLE IF NOT EXISTS finup_schema_versions (version VARCHAR(80) NOT NULL PRIMARY KEY, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB");
+    const connection = await this.defaultPool.getConnection();
+    const context = { pool: connection, userId: this.userId, controlId: this.controlId };
+    let locked = false;
+    try {
+      const [lock] = await connection.execute("SELECT GET_LOCK(CONCAT('finup-schema-', SHA1(DATABASE())), 15) AS acquired");
+      locked = Number(lock[0]?.acquired) === 1;
+      if (!locked) throw new Error("A atualização do banco ainda está em andamento.");
+      await this.requestContext.run(context, async () => {
+        const version = "20261119_smart_review_v2";
+        const [applied] = await connection.execute("SELECT 1 FROM finup_schema_versions WHERE version = ?", [version]);
+        if (applied.length) return;
+        await this.addColumnIfMissing("documents", "content_hash", "CHAR(64) CHARACTER SET ascii NULL AFTER mime_type");
+        await connection.execute(`CREATE TABLE IF NOT EXISTS transaction_documents (
+          transaction_id BIGINT UNSIGNED NOT NULL, document_id BIGINT UNSIGNED NOT NULL,
+          PRIMARY KEY (transaction_id, document_id), INDEX idx_transaction_documents_document (document_id),
+          CONSTRAINT fk_transaction_documents_transaction FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE,
+          CONSTRAINT fk_transaction_documents_document FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB`);
+        await this.backfillDocumentLinks();
+        await connection.execute("INSERT IGNORE INTO finup_schema_versions (version) VALUES (?)", [version]);
+      });
+    } finally {
+      try { if (locked) await connection.execute("SELECT RELEASE_LOCK(CONCAT('finup-schema-', SHA1(DATABASE())))"); }
+      finally { connection.release(); }
+    }
   }
 
   async addColumnIfMissing(table, column, definition) {

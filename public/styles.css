@@ -118,6 +118,7 @@ body:has(.app-shell:not([hidden])) { overflow: hidden; }
 .search-field input { background: transparent; border: 0; padding-left: 0; }
 .search-field svg { width: 18px; height: 18px; color: var(--muted); }
 .filter-fields, .form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.form-grid { align-items: end; }
 .filter-fields { padding: 16px 0; }
 .filter-fields > button { justify-self: start; }
 .selection-bar { position: sticky; top: -20px; z-index: 1; display: flex; flex-wrap: wrap; gap: 4px 10px; justify-content: space-between; align-items: center; padding: 8px 10px; border-radius: 8px; color: var(--blue); background: var(--blue-soft); font-size: 12px; }
@@ -165,6 +166,38 @@ body:has(.app-shell:not([hidden])) { overflow: hidden; }
 .capture-card dt { color: var(--muted); }
 .capture-card dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 .capture-card > button { margin-top: 10px; font-size: 12px; }
+.review-notices { margin: 14px 0; padding-left: 10px; border-left: 3px solid #d5a333; color: #795b18; }
+.review-issue { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.5; margin: 8px 0; }
+.review-issue svg { width: 16px; height: 16px; margin-top: 2px; }
+.review-field { display: inline-flex; align-items: center; gap: 5px; color: #795b18; }
+.review-field svg { width: 13px; height: 13px; }
+.review-value { border-bottom: 2px solid #d5a333; }
+.review-input > input, .review-input > select { border-color: #d5a333; background: #fffcf3; }
+.review-input > span::after { content: "Conferir"; margin-left: 8px; font-size: 11px; color: #795b18; }
+.item-main small.review-label { color: #795b18; display: flex; align-items: center; gap: 4px; }
+.review-label svg { width: 12px; height: 12px; }
+.duplicate-notice { margin: 10px 0; }
+.duplicate-notice > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; font-size: 13px; font-weight: 600; list-style: none; }
+.duplicate-notice > summary > svg { width: 17px; height: 17px; }
+.duplicate-notice > summary > svg:last-child { margin-left: auto; }
+.duplicate-notice > summary small { display: block; color: var(--muted); font-size: 11px; font-weight: 400; }
+.duplicate-candidates { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; }
+.duplicate-row { width: 100%; display: flex; gap: 10px; align-items: center; padding: 10px 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; text-align: left; color: var(--ink); font-weight: 400; }
+.duplicate-row > span { flex: 1; min-width: 0; }
+.duplicate-row strong { font-size: 12px; overflow-wrap: anywhere; }
+.duplicate-row > strong { flex: 0 0 auto; max-width: 42%; font-variant-numeric: tabular-nums; }
+.duplicate-row small { display: block; margin-top: 2px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.review-documents { margin: 14px 0; }
+.review-document { display: flex; width: 100%; min-height: 64px; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.review-document > img, .review-file-icon { width: 48px; height: 56px; flex: 0 0 48px; object-fit: contain; background: var(--bg); }
+.review-file-icon { display: grid; place-items: center; color: var(--muted); }
+.review-document > span:not(.review-file-icon) { flex: 1; min-width: 0; }
+.review-document strong { display: block; font-size: 13px; }
+.review-document small { display: block; margin-top: 3px; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-document > svg { width: 17px; height: 17px; }
+.review-ack { align-items: flex-start; margin: 16px 0; padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.review-ack > input { flex: 0 0 20px; margin: 1px 0 0; }
+.review-ack > span { font-size: 13px; color: var(--ink); font-weight: 400; }
 .settings-form { display: grid; gap: 14px; margin: 16px 0; }
 .settings-group { border-bottom: 1px solid var(--line); }
 .settings-group summary { display: flex; min-height: 64px; gap: 12px; align-items: center; list-style: none; font-weight: 600; }
