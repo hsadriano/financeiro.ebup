@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { monthlyOccurrences } from "../src/transaction-input.js";
 import { localDate, moveTargets } from "../public/ui-model.js";
 import { publicDocument, unreviewedDuplicateIds, withTransactionReviews } from "../src/transaction-review.js";
+import { planRecurrenceChange, recurrenceToken } from "../src/recurrence-management.js";
 
 // Isolated UI fixture: never loads .env, connects to a database or calls an AI provider.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
@@ -78,6 +79,17 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/api/session") return json(loggedIn ? session : { user: null });
     if (url.pathname.startsWith("/api/auth/")) { loggedIn = !url.pathname.endsWith("/logout"); return json(session); }
     if (url.pathname === "/api/state") return json(state());
+    if (["/api/recurrences/preview", "/api/recurrences/apply"].includes(url.pathname)) {
+      const current = transactions.filter((item) => item.controlId === session.activeControlId);
+      const plan = planRecurrenceChange(current, body);
+      const token = recurrenceToken(plan);
+      if (url.pathname.endsWith("/preview")) return json({ plan: { ...plan, token } });
+      if (body.token !== token) return json({ error: "A série mudou desde a prévia. Confira novamente antes de aplicar." }, 409);
+      if (plan.action === "cancel" && body.confirmCancellation !== true) return json({ error: "Confirme o cancelamento antes de aplicar." }, 400);
+      if (!plan.count) return json({ error: "Não há parcelas em aberto para alterar nesta seleção." }, 409);
+      for (const change of plan.changes) Object.assign(current.find((item) => String(item.id) === change.id), change);
+      return json({ ...state(), recurrence: { action: plan.action, changedCount: plan.count } });
+    }
     const documentView = url.pathname.match(/^\/api\/documents\/([^/]+)\/view$/);
     if (documentView) {
       if (!documents.some((item) => item.id === documentView[1] && item.controlId === session.activeControlId)) return json({ error: "Arquivo não encontrado" }, 404);
@@ -149,6 +161,6 @@ const server = createServer(async (req, res) => {
       return json(state());
     }
     return json({ error: "Operação indisponível nesta prévia de dados fictícios." }, 400);
-  } catch (error) { return json({ error: error.message }, error.code === "ENOENT" ? 404 : 500); }
+  } catch (error) { return json({ error: error.message }, error.status || (error.code === "ENOENT" ? 404 : 500)); }
 });
 server.listen(Number(process.env.PORT || 3021), "127.0.0.1", () => console.log("Prévia UX com dados fictícios: http://127.0.0.1:" + server.address().port));

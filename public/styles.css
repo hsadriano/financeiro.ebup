@@ -198,6 +198,17 @@ body:has(.app-shell:not([hidden])) { overflow: hidden; }
 .review-ack { align-items: flex-start; margin: 16px 0; padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .review-ack > input { flex: 0 0 20px; margin: 1px 0 0; }
 .review-ack > span { font-size: 13px; color: var(--ink); font-weight: 400; }
+.recurrence-preview { border-top: 1px solid var(--line); padding-top: 14px; }
+.recurrence-items { max-height: 260px; overflow-y: auto; overscroll-behavior: contain; }
+.recurrence-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.recurrence-row > span { flex: 1; min-width: 0; }
+.recurrence-row strong { display: block; font-size: 13px; overflow-wrap: anywhere; }
+.recurrence-row > strong { flex: 0 0 auto; max-width: 36%; font-variant-numeric: tabular-nums; }
+.recurrence-row small { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-top: 4px; color: var(--muted); font-size: 11px; }
+.recurrence-row small svg { width: 13px; height: 13px; }
+#recurrence-dialog .segmented button { gap: 5px; }
+#recurrence-dialog .segmented svg { width: 16px; height: 16px; }
+button.primary.cancel-series { background: var(--red); border-color: var(--red); }
 .settings-form { display: grid; gap: 14px; margin: 16px 0; }
 .settings-group { border-bottom: 1px solid var(--line); }
 .settings-group summary { display: flex; min-height: 64px; gap: 12px; align-items: center; list-style: none; font-weight: 600; }

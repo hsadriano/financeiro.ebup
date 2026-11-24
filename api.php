@@ -2,6 +2,7 @@
 declare(strict_types=1);
 require_once __DIR__ . '/app/capture-requests.php';
 require_once __DIR__ . '/app/transaction-review.php';
+require_once __DIR__ . '/app/recurrence-management.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -228,6 +229,14 @@ try {
         if (!$updated) respond(['error' => 'Nenhum lançamento correspondente foi atualizado.'], 404);
         add_message($pdo, $userId, $controlId, 'assistant', "Atualizei {$updated} lançamento(s) selecionado(s).");
         respond(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])));
+    }
+
+    if ($method === 'POST' && in_array($path, ['recurrences/preview', 'recurrences/apply'], true)) {
+        $body = json_decode((string)file_get_contents('php://input'), true);
+        if (!is_array($body)) respond(['error' => 'Solicitação de recorrência inválida.'], 400);
+        $apply = $path === 'recurrences/apply';
+        $result = manage_recurrence($pdo, $userId, $controlId, $body, $apply);
+        respond($apply ? array_merge(build_state(read_data($pdo, $userId, $controlId), session_payload($pdo, ['user_id' => $userId, 'active_control_id' => $controlId])), ['recurrence' => $result]) : ['plan' => $result]);
     }
 
     if ($method === 'POST' && $path === 'transactions/confirm') {

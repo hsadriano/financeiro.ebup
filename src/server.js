@@ -221,6 +221,13 @@ const server = createServer((request, response) => runStorageContext(async () =>
       return sendJson(response, buildState(await storage.read()));
     }
 
+    if (request.method === "POST" && ["/api/recurrences/preview", "/api/recurrences/apply"].includes(url.pathname)) {
+      const body = await readJson(request);
+      const apply = url.pathname.endsWith("/apply");
+      const result = await storage.manageRecurrence(body, apply);
+      return sendJson(response, apply ? { ...buildState(await storage.read()), recurrence: result } : { plan: result });
+    }
+
     if (request.method === "POST" && url.pathname === "/api/transactions/confirm") {
       const body = await readJson(request);
       return await confirmReviewedTransactions(response, body?.ids || [], body?.reviewedDuplicateIds || []);

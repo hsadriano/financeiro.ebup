@@ -179,3 +179,55 @@ test("PHP confirms reviewed captures atomically with scoped document links", { s
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.deepEqual(JSON.parse(result.stdout), { duplicates: true, atomic: true, idempotent: true, stale: true, scope: true, links: true });
 });
+
+async function extendSchoolSeries(connection) {
+  await connection.execute("INSERT INTO transactions (id,control_id,user_id,category_id,kind,status,description,amount,transaction_date,due_date,recurrence_group_id,recurrence_index,recurrence_total) VALUES (106,1,1,11,'expense','pending','Escola (3/3)',900,'2027-01-10','2027-01-10','school-fee',3,3)");
+}
+
+test("recurrence operations preserve paid installments and enforce source permissions", { skip: !enabled }, async () => {
+  await withDatabase(async ({ connection, storage }) => {
+    await extendSchoolSeries(connection);
+    const options = { anchorId: "101", scope: "all", action: "reschedule", day: 31 };
+    const preview = await storage.manageRecurrence(options);
+    assert.equal(preview.count, 2);
+    assert.equal(preview.preservedCount, 1);
+    await storage.manageRecurrence({ ...options, token: preview.token }, true);
+    const [rows] = await connection.execute("SELECT id,status,CAST(due_date AS CHAR) AS dueDate FROM transactions WHERE id IN (101,102,106) ORDER BY id");
+    assert.deepEqual(rows.map((row) => [row.id, row.status, row.dueDate]), [[101, "paid", "2026-11-10"], [102, "scheduled", "2026-12-31"], [106, "pending", "2027-01-31"]]);
+    storage.setContext(2, 1);
+    await assert.rejects(storage.manageRecurrence(options), { status: 403 });
+    storage.setContext(1, 1);
+    await assert.rejects(storage.manageRecurrence({ ...options, anchorId: "105" }), { status: 404 });
+    const cancel = { anchorId: "102", scope: "next", action: "cancel" };
+    const cancelPreview = await storage.manageRecurrence(cancel);
+    await assert.rejects(storage.manageRecurrence({ ...cancel, token: cancelPreview.token }, true), { status: 400 });
+    await storage.manageRecurrence({ ...cancel, token: cancelPreview.token, confirmCancellation: true }, true);
+    const [states] = await connection.execute("SELECT id,status FROM transactions WHERE id IN (101,102,105,106) ORDER BY id");
+    assert.deepEqual(states, [{ id: 101, status: "paid" }, { id: 102, status: "dismissed" }, { id: 105, status: "scheduled" }, { id: 106, status: "dismissed" }]);
+    const [[doc]] = await connection.execute("SELECT COUNT(*) AS count FROM documents WHERE id=201");
+    assert.equal(doc.count, 1);
+  });
+});
+
+test("recurrence previews become stale when a parcel is paid and failed operations roll back", { skip: !enabled }, async () => {
+  await withDatabase(async ({ connection, storage, wrapper }) => {
+    await extendSchoolSeries(connection);
+    const options = { anchorId: "101", scope: "all", action: "reschedule", day: 31 };
+    const preview = await storage.manageRecurrence(options);
+    await connection.execute("UPDATE transactions SET status='paid' WHERE id=102");
+    await assert.rejects(storage.manageRecurrence({ ...options, token: preview.token }, true), { status: 409 });
+    const [[pending]] = await connection.execute("SELECT CAST(due_date AS CHAR) AS dueDate FROM transactions WHERE id=106");
+    assert.equal(pending.dueDate, "2027-01-10");
+    await connection.execute("UPDATE transactions SET status='scheduled' WHERE id=102");
+    const fresh = await storage.manageRecurrence(options);
+    const execute = wrapper.execute;
+    let updates = 0;
+    wrapper.execute = async (sql, args) => {
+      if (sql.startsWith("UPDATE transactions") && ++updates === 2) throw new Error("Simulated recurrence write failure");
+      return execute(sql, args);
+    };
+    await assert.rejects(storage.manageRecurrence({ ...options, token: fresh.token }, true), /recurrence write failure/);
+    const [unchanged] = await connection.execute("SELECT CAST(due_date AS CHAR) AS dueDate FROM transactions WHERE id IN (102,106) ORDER BY id");
+    assert.deepEqual(unchanged.map((row) => row.dueDate), ["2026-12-10", "2027-01-10"]);
+  });
+});

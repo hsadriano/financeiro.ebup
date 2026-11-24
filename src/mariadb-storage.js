@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { executeCapture } from "./capture-requests.js";
 import { expandMoveRows, matchMoveWallet, normalizeMoveName } from "./transaction-move.js";
 import { confirmationIds, unreviewedDuplicateIds } from "./transaction-review.js";
+import { planRecurrenceChange, recurrenceToken } from "./recurrence-management.js";
 
 const defaultUser = {
   name: "Usuario principal",
@@ -337,6 +338,47 @@ export class MariaDbStorage {
       [...assignmentParams, ...targetParams, this.controlId]
     );
     return count;
+  }
+
+  async manageRecurrence(options, apply = false) {
+    if (!options || !["string", "number"].includes(typeof options.anchorId) || !/^\d{1,20}$/.test(String(options.anchorId))) throw Object.assign(new Error("Selecione uma parcela válida."), { status: 400 });
+    const userId = this.userId;
+    const controlId = this.controlId;
+    const requestPool = this.requestContext.getStore()?.pool;
+    const nested = Boolean(requestPool && requestPool !== this.defaultPool);
+    const connection = nested ? requestPool : await this.defaultPool.getConnection();
+    try {
+      if (!nested) await connection.beginTransaction();
+      const [members] = await connection.execute("SELECT role FROM control_members WHERE user_id = ? AND control_id = ? FOR UPDATE", [userId, controlId]);
+      if (!members.length || !["owner", "editor"].includes(members[0].role)) throw Object.assign(new Error("Você precisa ter permissão de edição para alterar esta série."), { status: 403 });
+      const [anchor] = await connection.execute("SELECT recurrence_group_id AS groupId FROM transactions WHERE id = ? AND control_id = ?", [options.anchorId, controlId]);
+      if (!anchor[0]?.groupId) throw Object.assign(new Error("A série recorrente não foi encontrada neste espaço."), { status: 404 });
+      const [rows] = await connection.execute(`SELECT CAST(id AS CHAR) AS id, recurrence_group_id AS recurrenceGroupId,
+        recurrence_index AS recurrenceIndex, status, amount, description, kind,
+        transaction_date AS transactionDate, due_date AS dueDate
+        FROM transactions WHERE control_id = ? AND recurrence_group_id = ? ORDER BY id FOR UPDATE`, [controlId, anchor[0].groupId]);
+      const plan = planRecurrenceChange(rows.map((row) => ({ ...row, transactionDate: toIsoDate(row.transactionDate), dueDate: row.dueDate ? toIsoDate(row.dueDate) : null })), options);
+      const token = recurrenceToken(plan);
+      if (apply) {
+        if (typeof options.token !== "string" || options.token !== token) throw Object.assign(new Error("A série mudou desde a prévia. Confira novamente antes de aplicar."), { status: 409 });
+        if (plan.action === "cancel" && options.confirmCancellation !== true) throw Object.assign(new Error("Confirme o cancelamento antes de aplicar."), { status: 400 });
+        if (!plan.count) throw Object.assign(new Error("Não há parcelas em aberto para alterar nesta seleção."), { status: 409 });
+        for (const change of plan.changes) {
+          const [result] = plan.action === "cancel"
+            ? await connection.execute("UPDATE transactions SET status = 'dismissed' WHERE id = ? AND control_id = ? AND status IN ('pending','scheduled') AND due_date IS NOT NULL", [change.id, controlId])
+            : await connection.execute("UPDATE transactions SET transaction_date = ?, due_date = ? WHERE id = ? AND control_id = ? AND status IN ('pending','scheduled') AND due_date IS NOT NULL", [change.transactionDate, change.dueDate, change.id, controlId]);
+          if (Number(result.affectedRows) !== 1) throw Object.assign(new Error("Uma parcela mudou durante a alteração. Nada foi aplicado; confira novamente."), { status: 409 });
+        }
+        const title = plan.items[0].description.replace(/\s+\(\d+\/\d+\)$/, "");
+        const quantity = `${plan.count} ${plan.count === 1 ? "parcela" : "parcelas"}`;
+        await connection.execute("INSERT INTO chat_messages (control_id,user_id,role,content) VALUES (?,?,'assistant',?)", [controlId, userId, (plan.action === "cancel" ? `Cancelei ${quantity} em aberto de “${title}”.` : `Atualizei o vencimento de ${quantity} em aberto de “${title}”.`) + " Pagamentos anteriores foram preservados."]);
+      }
+      if (!nested) await connection.commit();
+      return apply ? { action: plan.action, changedCount: plan.count } : { ...plan, token };
+    } catch (error) {
+      if (!nested) await connection.rollback();
+      throw error;
+    } finally { if (!nested) connection.release(); }
   }
 
   async confirmTransactions(inputIds, reviewedIds = []) {

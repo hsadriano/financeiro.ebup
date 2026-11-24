@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { confirmationIds, unreviewedDuplicateIds } from "./transaction-review.js";
+import { planRecurrenceChange, recurrenceToken } from "./recurrence-management.js";
 
 const initialData = {
   transactions: [],
@@ -117,6 +118,19 @@ export class JsonStorage {
     if (!transaction || !data.documents.some((item) => String(item.id) === String(documentId))) return;
     transaction.documentIds = [...new Set([...(transaction.documentIds || []), String(documentId)])];
     await this.write(data);
+  }
+
+  async manageRecurrence(options, apply = false) {
+    const data = await this.read();
+    const plan = planRecurrenceChange(data.transactions, options);
+    const token = recurrenceToken(plan);
+    if (!apply) return { ...plan, token };
+    if (options.token !== token) throw Object.assign(new Error("A série mudou desde a prévia. Confira novamente antes de aplicar."), { status: 409 });
+    if (plan.action === "cancel" && options.confirmCancellation !== true) throw Object.assign(new Error("Confirme o cancelamento antes de aplicar."), { status: 400 });
+    if (!plan.count) throw Object.assign(new Error("Não há parcelas em aberto para alterar nesta seleção."), { status: 409 });
+    for (const change of plan.changes) Object.assign(data.transactions.find((item) => String(item.id) === change.id), change);
+    await this.write(data);
+    return { action: plan.action, changedCount: plan.count };
   }
 
   async confirmTransactions(inputIds, reviewedIds = []) {

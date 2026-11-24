@@ -11,7 +11,7 @@
     <link rel="icon" type="image/png" href="/finup-favicon.png" />
     <link rel="apple-touch-icon" href="/finup-logo.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/styles.css?v=20261119-1" />
+    <link rel="stylesheet" href="/styles.css?v=20261123-1" />
     <script src="/lucide.min.js?v=0.468.0" defer></script>
   </head>
   <body>
@@ -90,6 +90,21 @@
       </nav>
     </main>
 
+    <dialog id="recurrence-dialog" class="sheet" aria-labelledby="recurrence-title">
+      <header class="sheet-heading"><div><p id="recurrence-space" class="eyebrow"></p><h1 id="recurrence-title">Série recorrente</h1></div><button type="button" class="icon-button" data-close="recurrence-dialog" aria-label="Fechar série" title="Fechar"><i data-lucide="x"></i></button></header>
+      <p id="recurrence-description" class="list-caption"></p>
+      <div class="segmented" aria-label="Alteração da série"><button type="button" data-recurrence-action="reschedule" class="active" aria-pressed="true"><i data-lucide="calendar-days"></i>Vencimentos</button><button type="button" data-recurrence-action="cancel" aria-pressed="false"><i data-lucide="ban"></i>Cancelar parcelas</button></div>
+      <form id="recurrence-form" class="settings-form">
+        <label><span>Parcelas</span><select name="scope"><option value="one">Só esta parcela em aberto</option><option value="next" selected>Esta e as próximas em aberto</option><option value="all">Todas as parcelas em aberto</option></select></label>
+        <label id="recurrence-day-field"><span>Novo dia de vencimento</span><input type="number" name="day" min="1" max="31" step="1" inputmode="numeric" required /></label>
+        <p class="list-caption" id="recurrence-policy">Pagamentos e recebimentos já registrados serão preservados.</p>
+        <section id="recurrence-preview" class="recurrence-preview" aria-live="polite" hidden></section>
+        <label id="recurrence-cancel-check" class="check-row review-ack" hidden><input type="checkbox" name="confirmCancellation" /><span>Confirmo o cancelamento das parcelas listadas.</span></label>
+        <p id="recurrence-error" class="inline-feedback error" role="alert" hidden></p>
+        <button id="recurrence-submit" type="submit" class="primary"><i data-lucide="list-checks"></i>Conferir alterações</button>
+        <button id="recurrence-values" type="button" class="text-button"><i data-lucide="pencil"></i>Alterar valor ou carteira</button>
+      </form>
+    </dialog>
     <dialog id="capture-dialog" class="sheet" aria-labelledby="capture-title">
       <header class="sheet-heading"><div><p class="eyebrow" id="capture-space"></p><h1 id="capture-title">Registrar</h1></div><button type="button" class="icon-button" data-close="capture-dialog" aria-label="Fechar registro" title="Fechar"><i data-lucide="x"></i></button></header>
       <div id="capture-entry">
@@ -110,6 +125,6 @@
     <div id="toast" class="toast" role="status" hidden><span id="toast-text"></span><button id="toast-action" class="text-button" type="button" hidden>Desfazer</button><button class="icon-button" type="button" id="toast-close" aria-label="Fechar aviso" title="Fechar aviso"><i data-lucide="x"></i></button></div>
     <input id="file-input" type="file" accept="image/*,.pdf,.txt,.csv" hidden /><input id="camera-input" type="file" accept="image/*" capture="environment" hidden />
     <datalist id="category-options"><option value="Mercado"></option><option value="Alimentação"></option><option value="Moradia"></option><option value="Transporte"></option><option value="Saúde"></option><option value="Educação"></option><option value="Lazer"></option><option value="Renda"></option><option value="Outros"></option></datalist>
-    <script src="/app.js?v=20261119-1" type="module"></script>
+    <script src="/app.js?v=20261123-1" type="module"></script>
   </body>
 </html>

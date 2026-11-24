@@ -11,7 +11,7 @@ import path from "node:path";
 import { loadEnv } from "../src/config.js";
 import { MariaDbStorage } from "../src/mariadb-storage.js";
 
-test("Node and PHP migrations and HTTP confirmation preserve reviewed captures", { skip: process.env.FINUP_TEST_MARIADB !== "1" }, async () => {
+test("Node and PHP APIs preserve capture and recurrence changes", { skip: process.env.FINUP_TEST_MARIADB !== "1" }, async () => {
   await loadEnv(fileURLToPath(new URL("../", import.meta.url)));
   assert.ok(["localhost", "127.0.0.1", "::1"].includes(process.env.DB_HOST));
   const database = "finup_review_test_" + crypto.randomBytes(6).toString("hex");
@@ -69,7 +69,7 @@ async function checkReviewApi(backend, database, config, storage) {
   if (backend === "php") {
     directory = await mkdtemp(path.join(tmpdir(), "finup-review-http-"));
     await mkdir(path.join(directory, "app"));
-    for (const filename of ["api.php", "app/capture-requests.php", "app/transaction-review.php"]) await copyFile(path.join(root, filename), path.join(directory, filename));
+    for (const filename of ["api.php", "app/capture-requests.php", "app/transaction-review.php", "app/recurrence-management.php"]) await copyFile(path.join(root, filename), path.join(directory, filename));
     await copyFile(new URL("./fixtures/api-router.php", import.meta.url), path.join(directory, "router.php"));
     const values = { DB_HOST: config.host, DB_PORT: String(config.port), DB_USER: config.user, DB_PASS: config.password, DB_NAME: database };
     assert.ok(Object.values(values).every((value) => !/[\r\n]/.test(value)));
@@ -121,6 +121,35 @@ async function checkReviewApi(backend, database, config, storage) {
     assert.equal(state.data.transactions.find((item) => item.id === duplicateId).review.documents[0].id, attachment.id);
     assert.equal(state.data.documents[0].storedName, undefined);
     assert.equal(state.data.documents[0].contentHash, undefined);
+    assert.equal((await api("transactions/" + ids[0] + "/paid", { transactionDate: "2026-11-23" })).status, 200);
+    const options = { anchorId: ids[0], action: "reschedule", scope: "all", day: 31 };
+    let preview = await api("recurrences/preview", options);
+    assert.equal(preview.status, 200);
+    assert.equal(preview.data.plan.count, 2);
+    assert.equal(preview.data.plan.preservedCount, 1);
+    assert.equal((await api("recurrences/preview", { ...options, day: 32 })).status, 400);
+    assert.equal((await api("recurrences/apply", { ...options, token: "invalid" })).status, 409);
+    assert.equal((await api("transactions/bulk-update", { ids: [ids[2]], amount: "43" })).status, 200);
+    assert.equal((await api("recurrences/apply", { ...options, token: preview.data.plan.token })).status, 409, "A stale preview must not overwrite a changed amount");
+    preview = await api("recurrences/preview", options);
+    const changed = await api("recurrences/apply", { ...options, token: preview.data.plan.token });
+    assert.equal(changed.status, 200);
+    assert.equal(changed.data.recurrence.changedCount, 2);
+    const paid = changed.data.transactions.find((item) => item.id === ids[0]);
+    assert.equal(paid.status, "paid");
+    assert.equal(paid.transactionDate, "2026-11-23");
+    for (const id of ids.slice(1)) assert.equal(changed.data.transactions.find((item) => item.id === id).dueDate.slice(8), "31");
+    const cancellation = { anchorId: ids[0], action: "cancel", scope: "all" };
+    const cancelPreview = await api("recurrences/preview", cancellation);
+    assert.equal(cancelPreview.data.plan.count, 2);
+    assert.equal((await api("recurrences/apply", { ...cancellation, token: cancelPreview.data.plan.token })).status, 400);
+    const canceled = await api("recurrences/apply", { ...cancellation, token: cancelPreview.data.plan.token, confirmCancellation: true });
+    assert.equal(canceled.status, 200);
+    assert.equal(canceled.data.recurrence.changedCount, 2);
+    assert.equal(canceled.data.transactions.find((item) => item.id === ids[0]).status, "paid");
+    assert.equal(canceled.data.transactions.some((item) => ids.slice(1).includes(item.id)), false);
+    assert.equal(canceled.data.transactions.some((item) => item.id === duplicateId), true, "Another series or standalone item must not be canceled");
+    assert.equal(canceled.data.documents[0].id, attachment.id);
   } finally {
     if (child.exitCode === null && child.signalCode === null) { const stopped = once(child, "exit"); child.kill("SIGTERM"); await stopped; }
     if (directory) await rm(directory, { recursive: true, force: true });

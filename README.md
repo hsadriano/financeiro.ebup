@@ -47,6 +47,7 @@ Em hospedagem PHP/Apache, como Hostinger compartilhada, o projeto tambem roda di
 - Registro manual sem IA, com repetição mensal e ajuste ao último dia do mês.
 - Edição de lançamentos salvos, registro de pagamento/recebimento e remoção com desfazer.
 - Alteração de valor/carteira em seleção ou série: só este, este e os próximos, ou todos.
+- Gestão de parcelas em aberto: cancelamento e ajuste de vencimentos com prévia e proteção do histórico pago.
 - Movimentação de lançamentos entre espaços, individualmente, em seleção ou pelo chat.
 - Armazenamento em MariaDB quando `.env` estiver configurado.
 - Fallback local em `data/finance.json` quando não houver configuração de banco.
@@ -122,6 +123,31 @@ FINUP_TEST_MARIADB=1 node --test test/transaction-move-mariadb.test.js
 
 Esse teste exige `DB_HOST` local, usa o `.env` existente e não altera as tabelas
 permanentes do app.
+
+## Gestão de recorrências
+
+Nos detalhes de um lançamento recorrente, **Gerenciar série** permite alterar o dia
+de vencimento ou cancelar parcelas. É possível selecionar somente a ocorrência
+escolhida, ela e as próximas pela ordem da série, ou todas as parcelas em aberto.
+Esse fluxo também fica disponível ao editar uma captura recorrente ainda pendente.
+
+Somente registros agendados e rascunhos com vencimento participam dessas operações.
+Pagamentos, recebimentos e rascunhos já informados como realizados não são alterados.
+A troca do dia mantém o mês de cada parcela e usa seu último dia quando necessário,
+incluindo fevereiro em anos bissextos. Valores, carteiras, categorias, IDs e vínculos
+com comprovantes são preservados.
+
+Antes de aplicar, o servidor devolve a lista de parcelas e datas afetadas. Se houver
+uma mudança desde essa prévia, é necessário conferi-la novamente. Cancelamentos
+exigem confirmação adicional; os registros são retirados das listas sem apagar os
+comprovantes ou renumerar as parcelas restantes. Como as séries atuais são finitas,
+encerrá-las significa cancelar as ocorrências em aberto já criadas, não interromper
+um agendador automático. Alterações de valor/carteira continuam no fluxo já existente.
+
+As operações exigem permissão de edição no espaço atual e são aplicadas em uma única
+transação. Uma falha durante a alteração não salva apenas parte da série. Nesta
+etapa, o gerenciamento é feito pela interface; não há novo comando de cancelamento
+ou vencimento no chat.
 
 ## Rascunhos e reenvio
 
@@ -264,15 +290,14 @@ banco do app nem chamam os serviços de IA.
 
 ## Fila de evolução
 
-A conferência inteligente é a primeira etapa concluída da próxima rodada. A ordem
+A conferência inteligente e a gestão de recorrências são etapas concluídas desta rodada. A ordem
 planejada para as seguintes é:
 
-1. Encerrar recorrências, cancelar parcelas futuras e facilitar ajustes de vencimento.
-2. Alertas de contas próximas e atrasadas, pagamento e recebimento rápidos.
-3. Fluxo de caixa futuro, previsão de saldo por carteira e orçamento por categoria.
-4. Primeiro uso guiado para espaços, carteiras e saldos; login Google continua adiado.
-5. Abertura e registro sem conexão, com sincronização posterior.
-6. Preparação para lançamento: privacidade, consentimento para IA, exportação/exclusão de dados, permissões, credenciais, backups, testes físicos e pacote nativo.
+1. Alertas de contas próximas e atrasadas, pagamento e recebimento rápidos.
+2. Fluxo de caixa futuro, previsão de saldo por carteira e orçamento por categoria.
+3. Primeiro uso guiado para espaços, carteiras e saldos; login Google continua adiado.
+4. Abertura e registro sem conexão, com sincronização posterior.
+5. Preparação para lançamento: privacidade, consentimento para IA, exportação/exclusão de dados, permissões, credenciais, backups, testes físicos e pacote nativo.
 
 Antes das lojas: testar câmera, microfone, teclado e safe areas em aparelhos físicos,
 adicionar consentimento de processamento por IA, exclusão de conta/dados e o pacote

@@ -12,6 +12,7 @@ const state = {
   session: null, data: null, panel: "home", back: "home", busy: false, captureIds: [],
   selected: new Set(), selecting: false, billFilter: "open", category: "expense",
   detailId: null, bulkAnchor: null, moveIds: [], moveWallets: null, moveWalletRequest: 0, moveLoading: false,
+  recurrenceAnchor: null, recurrencePlan: null, recurrenceAction: "reschedule", recurrenceLimit: 50,
   audio: null, stream: null, chunks: [], timer: null,
   ledgerLimit: 50, documentLimit: 50, messageLimit: 60,
   audioOrigin: "capture", chatDrafts: new Map(),
@@ -72,6 +73,7 @@ async function task(action, target) {
     $("move-selected").disabled = !state.selected.size;
     if ($("move-dialog").open) previewMove();
     if ($("capture-dialog").open && !$("capture-result").hidden) syncCaptureSave();
+    if ($("recurrence-dialog").open) syncRecurrenceSubmit();
   }
 }
 
@@ -631,7 +633,7 @@ function showCapture(ids) {
   $("capture-save").innerHTML = icon("check") + (drafts.length > 1 ? "Salvar " + drafts.length + " lançamentos" : "Salvar lançamento");
   $("capture-duplicate-ack").checked = false;
   syncCaptureSave();
-  $("capture-edit").onclick = () => drafts.length > 1 && drafts[0].recurrenceGroupId ? openBulk(drafts[0]) : openDetail(drafts[0].id);
+  $("capture-edit").onclick = () => drafts.length > 1 && drafts[0].recurrenceGroupId ? openRecurrence(drafts[0]) : openDetail(drafts[0].id);
   openSheet("capture-dialog");
 }
 $("capture-save").onclick = () => task(async () => {
@@ -697,6 +699,7 @@ function openDetail(id) {
   }
   const updateDue = () => { $("detail-due").hidden = form.elements.paymentState.value !== "scheduled"; form.elements.dueDate.required = !$("detail-due").hidden; };
   form.elements.paymentState.onchange = updateDue; updateDue();
+  const detailInitialValues = JSON.stringify(Object.fromEntries(new FormData(form)));
   form.onsubmit = (event) => {
     event.preventDefault();
     task(async () => {
@@ -708,7 +711,17 @@ function openDetail(id) {
       toast("Lançamento atualizado.");
     }, "detail-error");
   };
-  if ($("detail-series")) $("detail-series").onclick = () => openBulk(item);
+  if ($("detail-series")) {
+    $("detail-series").querySelector("span").textContent = "Gerenciar série recorrente";
+    $("detail-series").onclick = () => {
+      if (JSON.stringify(Object.fromEntries(new FormData(form))) !== detailInitialValues) { feedback("detail-error", "Salve a edição antes de alterar a série.", true); return; }
+      openRecurrence(item);
+    };
+  }
+  if (item.recurrenceGroupId && $("detail-summary") && canEditCurrentSpace()) {
+    $("detail-summary").insertAdjacentHTML("beforeend", '<button type="button" id="detail-manage-series" class="text-button">' + icon("repeat-2") + 'Gerenciar série</button>');
+    $("detail-manage-series").onclick = () => { $("detail-dialog").close(); openRecurrence(item); };
+  }
   if ($("detail-move-button")) $("detail-move-button").onclick = () => {
     $("detail-dialog").close();
     openMove([id]);
@@ -728,6 +741,84 @@ function openDetail(id) {
   }, "detail-error");
   openSheet("detail-dialog");
 }
+function canEditCurrentSpace() {
+  const active = state.session?.controls?.find((control) => String(control.id) === String(state.session.activeControlId));
+  return Boolean(active && ["owner", "editor"].includes(active.role));
+}
+function recurrenceInput() {
+  const form = $("recurrence-form");
+  return { anchorId: String(state.recurrenceAnchor.id), action: state.recurrenceAction, scope: form.elements.scope.value, ...(state.recurrenceAction === "reschedule" ? { day: Number(form.elements.day.value) } : {}) };
+}
+function syncRecurrenceSubmit() {
+  const plan = state.recurrencePlan;
+  const cancel = state.recurrenceAction === "cancel";
+  const needsAck = Boolean(plan?.count && cancel);
+  $("recurrence-cancel-check").hidden = !needsAck;
+  $("recurrence-form").elements.confirmCancellation.required = needsAck;
+  $("recurrence-submit").disabled = state.busy || Boolean(plan && (!plan.count || (cancel && !$("recurrence-form").elements.confirmCancellation.checked)));
+  $("recurrence-submit").classList.toggle("cancel-series", Boolean(plan && cancel));
+  $("recurrence-submit").innerHTML = icon(plan ? cancel ? "ban" : "check" : "list-checks") + (plan ? cancel ? "Confirmar cancelamento" : "Aplicar vencimentos" : "Conferir alterações");
+  icons();
+}
+function invalidateRecurrence() {
+  state.recurrencePlan = null; state.recurrenceLimit = 50;
+  $("recurrence-preview").hidden = true;
+  $("recurrence-error").hidden = true;
+  $("recurrence-form").elements.confirmCancellation.checked = false;
+  const cancel = state.recurrenceAction === "cancel";
+  $("recurrence-day-field").hidden = cancel;
+  $("recurrence-form").elements.day.required = !cancel;
+  $("recurrence-policy").textContent = cancel ? "As parcelas listadas serão retiradas do extrato. Pagamentos e recebimentos já registrados serão preservados." : "Meses mais curtos usam o último dia do mês. Pagamentos e recebimentos já registrados serão preservados.";
+  all("[data-recurrence-action]").forEach((button) => { const active = button.dataset.recurrenceAction === state.recurrenceAction; button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active)); });
+  syncRecurrenceSubmit();
+}
+function showRecurrencePlan(plan) {
+  state.recurrencePlan = plan;
+  const count = plan.count;
+  const cancel = plan.action === "cancel";
+  const heading = count ? count + (count === 1 ? " parcela " : " parcelas ") + (cancel ? count === 1 ? "será cancelada" : "serão canceladas" : count === 1 ? "terá novo vencimento" : "terão novos vencimentos") : "Nenhuma alteração nesta seleção";
+  $("recurrence-preview").innerHTML = '<h2>' + heading + '</h2>' + (plan.preservedCount ? '<p class="list-caption">' + plan.preservedCount + (plan.preservedCount === 1 ? ' lançamento pago ou recebido preservado.' : ' lançamentos pagos ou recebidos preservados.') + '</p>' : '') +
+    '<div class="recurrence-items">' + plan.items.slice(0, state.recurrenceLimit).map((item) => '<div class="recurrence-row"><span><strong>' + escape(item.description) + '</strong><small>' + date(item.oldDate) + (item.newDate ? ' ' + icon("arrow-right") + ' ' + date(item.newDate) : '') + '</small><small>' + (item.status === "pending" ? "Rascunho" : item.kind === "income" ? "A receber" : "A pagar") + '</small></span><strong>' + money(item.amount) + '</strong></div>').join("") + '</div>' +
+    (count > state.recurrenceLimit ? '<button id="recurrence-more" type="button" class="text-button">Ver todas as ' + count + ' parcelas</button>' : '') + (!count ? '<p class="list-caption">Não há parcelas em aberto para alterar, ou os vencimentos já estão no dia escolhido.</p>' : '');
+  $("recurrence-preview").hidden = false;
+  if ($("recurrence-more")) $("recurrence-more").onclick = () => { state.recurrenceLimit = count; showRecurrencePlan(plan); };
+  syncRecurrenceSubmit();
+}
+function openRecurrence(item) {
+  if (!item?.recurrenceGroupId || !canEditCurrentSpace()) { toast("Você precisa ter permissão de edição para gerenciar esta série."); return; }
+  state.recurrenceAnchor = item; state.recurrenceAction = "reschedule";
+  $("recurrence-form").reset();
+  $("recurrence-form").elements.scope.value = "next";
+  $("recurrence-form").elements.day.value = Number((item.dueDate || item.transactionDate).slice(8, 10)) || 1;
+  $("recurrence-space").textContent = "Espaço: " + activeSpace();
+  $("recurrence-description").textContent = item.description.replace(/\s+\(\d+\/\d+\)$/, "");
+  invalidateRecurrence(); openSheet("recurrence-dialog");
+}
+all("[data-recurrence-action]").forEach((button) => { button.onclick = () => { state.recurrenceAction = button.dataset.recurrenceAction; invalidateRecurrence(); }; });
+$("recurrence-form").elements.scope.onchange = invalidateRecurrence;
+$("recurrence-form").elements.day.oninput = invalidateRecurrence;
+$("recurrence-form").elements.confirmCancellation.onchange = syncRecurrenceSubmit;
+$("recurrence-values").onclick = () => { $("recurrence-dialog").close(); openBulk(state.recurrenceAnchor); };
+$("recurrence-form").onsubmit = (event) => {
+  event.preventDefault();
+  task(async () => {
+    const input = recurrenceInput();
+    const plan = state.recurrencePlan;
+    const controls = [$("recurrence-form").elements.scope, $("recurrence-form").elements.day];
+    controls.forEach((control) => { control.disabled = true; });
+    try {
+      if (!plan) { showRecurrencePlan((await request("/api/recurrences/preview", input)).plan); return; }
+      const result = await request("/api/recurrences/apply", { ...input, token: plan.token, confirmCancellation: $("recurrence-form").elements.confirmCancellation.checked });
+      render(result); $("recurrence-dialog").close();
+      if ($("detail-dialog").open) $("detail-dialog").close();
+      if ($("capture-dialog").open) showCapture(state.captureIds);
+      const count = result.recurrence.changedCount;
+      toast(count + (count === 1 ? " parcela " : " parcelas ") + (input.action === "cancel" ? count === 1 ? "cancelada." : "canceladas." : count === 1 ? "com vencimento atualizado." : "com vencimentos atualizados."));
+    } catch (error) { invalidateRecurrence(); throw error; }
+    finally { controls.forEach((control) => { control.disabled = false; }); }
+  }, "recurrence-error");
+};
+
 function bulkTargets() {
   const items = [...state.data.transactions, ...state.data.pendingTransactions];
   return state.bulkAnchor ? seriesTargets(items, state.bulkAnchor, $("bulk-form").elements.scope.value) : items.filter((item) => state.selected.has(String(item.id)));
